@@ -690,3 +690,39 @@ func TestPruneGhostSnapshots(t *testing.T) {
 	checkTestSnapshots(snapshotManager, 3, 0)
 	snapshotManager.CheckSnapshots("vm1@host1", []int{2, 3, 4}, "", false, false, false, false, false, false, false, 1, false)
 }
+
+// B7: retention policies used to be applied only when given in decreasing order of age; others were skipped.
+func TestPruneRetentionPolicyOrder(t *testing.T) {
+	setTestingT(t)
+
+	run := func(name string, retentions []string) int {
+		testDir := path.Join(os.TempDir(), "duplicacy_test", "retention_order_"+name)
+		snapshotManager := createTestSnapshotManager(testDir)
+		var chunkHashes []string
+		for i := 0; i < 30; i++ {
+			chunkHashes = append(chunkHashes, uploadRandomChunk(snapshotManager, 1024))
+		}
+		now := time.Now().Unix()
+		day := int64(24 * 3600)
+		for i := 0; i < 30; i++ {
+			createTestSnapshot(snapshotManager, "vm1@host1", i+1, now-int64(30-i)*day-3600, now-int64(30-i)*day-60,
+				[]string{chunkHashes[i]}, "tag")
+		}
+		snapshotManager.PruneSnapshots("vm1@host1", "vm1@host1", []int{}, []string{}, retentions, false, true,
+			[]string{}, false, false, false, 1)
+		revisions, err := snapshotManager.ListSnapshotRevisions("vm1@host1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(revisions)
+	}
+
+	ordered := run("ordered", []string{"0:20", "3:14", "2:7"})
+	misordered := run("misordered", []string{"2:7", "0:20", "3:14"})
+	if ordered != 12 {
+		t.Errorf("%d snapshots kept with ordered policies instead of 12", ordered)
+	}
+	if misordered != ordered {
+		t.Errorf("%d snapshots kept with policies out of order instead of %d", misordered, ordered)
+	}
+}

@@ -1956,14 +1956,22 @@ func (manager *SnapshotManager) PruneSnapshots(selfID string, snapshotID string,
 			return false
 		}
 
+		// The policies are applied from the oldest age down, whatever order they were given in; policies given out
+		// of order used to be skipped silently
+		sort.SliceStable(retentionPolicies, func(i, j int) bool {
+			return retentionPolicies[i].Age > retentionPolicies[j].Age
+		})
+
 		for i, policy := range retentionPolicies {
-			if i == 0 || policy.Age < retentionPolicies[i-1].Age {
-				if policy.Interval == 0 {
-					LOG_INFO("RETENTION_POLICY", "Keep no snapshots older than %d days", policy.Age)
-				} else {
-					LOG_INFO("RETENTION_POLICY", "Keep 1 snapshot every %d day(s) if older than %d day(s)",
-						policy.Interval, policy.Age)
-				}
+			if i > 0 && policy.Age == retentionPolicies[i-1].Age {
+				LOG_ERROR("RETENTION_INVALID", "More than one retention policy for snapshots older than %d days", policy.Age)
+				return false
+			}
+			if policy.Interval == 0 {
+				LOG_INFO("RETENTION_POLICY", "Keep no snapshots older than %d days", policy.Age)
+			} else {
+				LOG_INFO("RETENTION_POLICY", "Keep 1 snapshot every %d day(s) if older than %d day(s)",
+					policy.Interval, policy.Age)
 			}
 		}
 	}
