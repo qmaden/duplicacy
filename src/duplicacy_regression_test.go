@@ -327,7 +327,10 @@ func TestSnapshotCacheIsPrivate(t *testing.T) {
 // B4: resuming an interrupted backup reused the chunks it had uploaded without checking that they still exist.
 // They belong to no snapshot, so prune may have removed them in the meantime.
 func TestResumeChecksIncompleteChunks(t *testing.T) {
-	setTestingT(t)
+	// The interrupted backup leaves upload goroutines finishing their chunks, which read the logger's test hook;
+	// it is cleared once here, before any goroutine starts, instead of being switched around the interruption.
+	// Errors still panic and are reported by catchFixtureException.
+	testingT = nil
 	SetLoggingLevel(ERROR)
 	defer catchFixtureException(t)
 
@@ -360,10 +363,7 @@ func TestResumeChecksIncompleteChunks(t *testing.T) {
 	// Interrupt the first backup; the process would save the incomplete snapshot on its way out
 	os.Setenv("DUPLICACY_FAIL_CHUNK", "10")
 	func() {
-		// The interruption is expected; don't let its LOG_ERROR fail the test
-		testingT = nil
 		defer func() {
-			setTestingT(t)
 			if r := recover(); r != nil {
 				RunAtError()
 			}
