@@ -47,6 +47,7 @@ type ChunkOperator struct {
 	stopChannel    chan bool      // Used to stop all the goroutines
 
 	numberOfActiveTasks int64 // The number of chunks that are being operated on
+	stopped             int32 // Set by the first call to Stop()
 
 	fossils        []string    // For fossilize operation, the paths of the fossils are stored in this slice
 	collectionLock *sync.Mutex // The lock for accessing 'fossils'
@@ -102,7 +103,8 @@ func CreateChunkOperator(config *Config, storage Storage, snapshotCache *FileSto
 }
 
 func (operator *ChunkOperator) Stop() {
-	if atomic.LoadInt64(&operator.numberOfActiveTasks) < 0 {
+	// Stop() may be called more than once
+	if !atomic.CompareAndSwapInt32(&operator.stopped, 0, 1) {
 		return
 	}
 
@@ -113,8 +115,6 @@ func (operator *ChunkOperator) Stop() {
 		operator.stopChannel <- false
 	}
 
-	// Assign -1 to numberOfActiveTasks so Stop() can be called multiple times
-	atomic.AddInt64(&operator.numberOfActiveTasks, int64(-1))
 }
 
 func (operator *ChunkOperator) WaitForCompletion() {
@@ -138,8 +138,10 @@ func (operator *ChunkOperator) AddTask(operation int, chunkID string, chunkHash 
 		completionFunc: completionFunc,
 	}
 
-	operator.taskQueue <- task
+	// Count the task before a worker can pick it up and finish it, so the count never drops below the number of
+	// tasks still pending and WaitForCompletion can't return early
 	atomic.AddInt64(&operator.numberOfActiveTasks, int64(1))
+	operator.taskQueue <- task
 
 	return
 }
@@ -512,7 +514,8 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 
 	downloadedChunkSize := atomic.AddInt64(&operator.downloadedChunkSize, int64(chunk.GetLength()))
 
-	if (operator.showStatistics || IsTracing()) && operator.totalChunkSize > 0 {
+	totalChunkSize := atomic.LoadInt64(&operator.totalChunkSize)
+	if (operator.showStatistics || IsTracing()) && totalChunkSize > 0 {
 
 		now := time.Now().Unix()
 		if now <= operator.startTime {
@@ -521,9 +524,9 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 		speed := downloadedChunkSize / (now - operator.startTime)
 		remainingTime := int64(0)
 		if speed > 0 {
-			remainingTime = (operator.totalChunkSize-downloadedChunkSize)/speed + 1
+			remainingTime = (totalChunkSize-downloadedChunkSize)/speed + 1
 		}
-		percentage := float32(downloadedChunkSize * 1000 / operator.totalChunkSize)
+		percentage := float32(downloadedChunkSize * 1000 / totalChunkSize)
 		LOG_INFO("DOWNLOAD_PROGRESS", "Downloaded chunk %d size %d, %sB/s %s %.1f%%",
 			task.chunkIndex+1, chunk.GetLength(),
 			PrettySize(speed), PrettyTime(remainingTime), percentage/10)

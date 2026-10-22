@@ -1885,12 +1885,14 @@ func (manager *BackupManager) CopySnapshots(otherManager *BackupManager, snapsho
 	var uploadedBytes int64
 	startTime := time.Now()
 
-	copiedChunks := 0
+	// Updated by the upload goroutines
+	var copiedChunks int64
 	chunkUploader := CreateChunkOperator(otherManager.config, otherManager.storage, nil, false, false, uploadingThreads, false)
 	chunkUploader.UploadCompletionFunc = func(chunk *Chunk, chunkIndex int, skipped bool, chunkSize int, uploadSize int) {
+		// A chunk that already exists at the destination is completed without being uploaded (uploadSize is 0)
 		action := "Skipped"
-		if !skipped {
-			copiedChunks++
+		if !skipped && uploadSize > 0 {
+			atomic.AddInt64(&copiedChunks, 1)
 			action = "Copied"
 		}
 
@@ -1925,7 +1927,7 @@ func (manager *BackupManager) CopySnapshots(otherManager *BackupManager, snapsho
 	chunkDownloader.Stop()
 	chunkUploader.Stop()
 
-	LOG_INFO("SNAPSHOT_COPY", "Copied %d new chunks and skipped %d existing chunks", copiedChunks, len(chunks)-copiedChunks)
+	LOG_INFO("SNAPSHOT_COPY", "Copied %d new chunks and skipped %d existing chunks", copiedChunks, int64(len(chunks))-copiedChunks)
 
 	for _, snapshot := range snapshots {
 		if revisionMap[snapshot.ID][snapshot.Revision] == false {

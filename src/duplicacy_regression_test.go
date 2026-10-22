@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // openFixture copies a golden fixture to a temporary directory and returns a backup manager for it.
@@ -488,5 +490,94 @@ func TestComputeFileHashReadError(t *testing.T) {
 	os.WriteFile(file, []byte("content"), 0600)
 	if hash := config.ComputeFileHash(file, make([]byte, 4096)); hash == "" {
 		t.Error("Hashing a readable file failed")
+	}
+}
+
+// B10: Stop() used a negative task count as the "stopped" marker, which a task finishing before it was counted
+// could produce.  Stop must be safe to call twice, and WaitForCompletion must wait for queued tasks.
+func TestChunkOperatorStopAndWait(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	config := CreateConfigFromParameters(DEFAULT_COMPRESSION_LEVEL, 4096, 16384, 1024, false, nil, false)
+	storage, err := CreateFileStorage(t.TempDir(), false, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.SetDefaultNestingLevels([]int{1}, 1)
+	storage.CreateDirectory(0, "chunks")
+
+	operator := CreateChunkOperator(config, storage, nil, false, false, 2, false)
+	var uploaded int64
+	operator.UploadCompletionFunc = func(chunk *Chunk, chunkIndex int, inCache bool, chunkSize int, uploadSize int) {
+		atomic.AddInt64(&uploaded, 1)
+		config.PutChunk(chunk)
+	}
+	for i := 0; i < 50; i++ {
+		chunk := config.GetChunk()
+		chunk.Reset(true)
+		chunk.Write(fixtureBytes(2000, uint32(i)))
+		operator.Upload(chunk, i, false)
+	}
+	operator.WaitForCompletion()
+	if n := atomic.LoadInt64(&uploaded); n != 50 {
+		t.Errorf("WaitForCompletion returned after %d of 50 uploads", n)
+	}
+
+	done := make(chan bool)
+	go func() {
+		operator.Stop()
+		operator.Stop()
+		done <- true
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stopping the chunk operator twice hung")
+	}
+}
+
+// B11: copy counted copied chunks from several upload goroutines without synchronization.  This also covers copy
+// itself, which had no test.
+func TestCopySnapshots(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	testDir := t.TempDir()
+	repository := filepath.Join(testDir, "repository")
+	os.MkdirAll(filepath.Join(repository, DUPLICACY_DIRECTORY), 0700)
+	for i := 0; i < 4; i++ {
+		os.WriteFile(filepath.Join(repository, "file"+string(rune('a'+i))), fixtureBytes(30000, uint32(20+i)), 0600)
+	}
+	sourceDir := backupForRestoreTest(t, repository)
+
+	SetDuplicacyPreferencePath(filepath.Join(repository, DUPLICACY_DIRECTORY))
+	sourceStorage, _ := CreateFileStorage(sourceDir, false, 4)
+	source := CreateBackupManager("test", sourceStorage, repository, "", "", "", false)
+	source.SetupSnapshotCache("default")
+
+	destinationDir := filepath.Join(testDir, "destination")
+	destinationStorage, _ := CreateFileStorage(destinationDir, false, 4)
+	if !ConfigStorage(destinationStorage, CONFIG_LEGACY_ITERATIONS, DEFAULT_COMPRESSION_LEVEL, 4096, 16384, 1024, "",
+		source.config, true, "", 0, 0) {
+		t.Fatal("Failed to initialize the destination storage")
+	}
+	destinationStorage, _ = CreateFileStorage(destinationDir, false, 4)
+	destination := CreateBackupManager("test", destinationStorage, repository, "", "", "", false)
+	destination.SetupSnapshotCache("destination")
+
+	if !source.CopySnapshots(destination, "test", nil, 4, 4) {
+		t.Fatal("Copy failed")
+	}
+
+	top := filepath.Join(testDir, "restore")
+	if failed := restoreForTest(t, destinationDir, top, true, false); failed != 0 {
+		t.Fatalf("%d files failed to restore from the copy", failed)
+	}
+	for i := 0; i < 4; i++ {
+		restored, _ := os.ReadFile(filepath.Join(top, "file"+string(rune('a'+i))))
+		if !bytes.Equal(restored, fixtureBytes(30000, uint32(20+i))) {
+			t.Errorf("file%c was not copied correctly", 'a'+i)
+		}
 	}
 }

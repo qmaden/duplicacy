@@ -94,7 +94,7 @@ func (downloader *ChunkDownloader) AddFiles(snapshot *Snapshot, files []*Entry) 
 			maximumChunks = file.EndChunk - file.StartChunk
 		}
 	}
-	downloader.operator.totalChunkSize = downloader.totalChunkSize
+	atomic.StoreInt64(&downloader.operator.totalChunkSize, downloader.totalChunkSize)
 }
 
 // Prefetch adds up to 'threads' chunks needed by a file to the download list
@@ -148,6 +148,8 @@ func (downloader *ChunkDownloader) Reclaim(chunkIndex int) {
 		// false after a chunk has been downloaded
 		if !downloader.taskList[i].isDownloading {
 			atomic.AddInt64(&downloader.totalChunkSize, -int64(downloader.taskList[i].chunkLength))
+			// The operator reports the progress, so it needs the adjusted total too
+			atomic.AddInt64(&downloader.operator.totalChunkSize, -int64(downloader.taskList[i].chunkLength))
 		}
 	}
 	downloader.lastChunkIndex = chunkIndex
