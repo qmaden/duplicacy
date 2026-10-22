@@ -470,35 +470,7 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 		}
 
 		if rewriteNeeded && operator.rewriteChunks {
-
-			if filePath != fossilPath {
-				fossilPath = filePath + ".fsl"
-				err := operator.storage.MoveFile(threadIndex, chunkPath, fossilPath)
-				if err != nil {
-					LOG_WARN("CHUNK_REWRITE", "Failed to fossilize the chunk %s: %v", task.chunkID, err)
-				} else {
-					LOG_TRACE("CHUNK_REWRITE", "The existing chunk %s has been marked as a fossil for rewrite", task.chunkID)
-					operator.collectionLock.Lock()
-					operator.fossils = append(operator.fossils, fossilPath)
-					operator.collectionLock.Unlock()
-				}
-			}
-
-			newChunk := operator.config.GetChunk()
-			newChunk.Reset(true)
-			newChunk.Write(chunk.GetBytes())
-			// Encrypt the chunk only after we know that it must be uploaded.
-			err = newChunk.Encrypt(operator.config.ChunkKey, chunk.GetHash(), task.isMetadata)
-			if err == nil {
-				// Re-upload the chunk
-				err = operator.storage.UploadFile(threadIndex, chunkPath, newChunk.GetBytes())
-				if err != nil {
-					LOG_WARN("CHUNK_REWRITE", "Failed to re-upload the chunk %s: %v", chunkID, err)
-				} else {
-					LOG_INFO("CHUNK_REWRITE", "The chunk %s has been re-uploaded", chunkID)
-				}
-			}
-			operator.config.PutChunk(newChunk)
+			operator.rewriteChunk(threadIndex, chunk, chunkID, chunkPath, filePath, fossilPath, task.isMetadata)
 		}
 
 		break
@@ -597,4 +569,48 @@ func (operator *ChunkOperator) UploadChunk(threadIndex int, task ChunkTask) bool
 
 	operator.UploadCompletionFunc(chunk, task.chunkIndex, false, chunkSize, chunk.GetLength())
 	return true
+}
+
+// rewriteChunk stores a freshly encoded copy of a chunk that could only be read by recovering it from its erasure
+// coding parity.  The old copy is moved aside as a fossil first (some storages can't overwrite a file in place)
+// and moved back if the new copy can't be stored, so the chunk is never left only as a fossil.
+func (operator *ChunkOperator) rewriteChunk(threadIndex int, chunk *Chunk, chunkID string, chunkPath string,
+	filePath string, fossilPath string, isMetadata bool) {
+
+	// Encode the new copy before touching the old one
+	newChunk := operator.config.GetChunk()
+	defer operator.config.PutChunk(newChunk)
+	newChunk.Reset(true)
+	newChunk.Write(chunk.GetBytes())
+	if err := newChunk.Encrypt(operator.config.ChunkKey, chunk.GetHash(), isMetadata); err != nil {
+		LOG_WARN("CHUNK_REWRITE", "Failed to encode the chunk %s: %v", chunkID, err)
+		return
+	}
+
+	movedPath := ""
+	if filePath != fossilPath {
+		movedPath = filePath + ".fsl"
+		if err := operator.storage.MoveFile(threadIndex, chunkPath, movedPath); err != nil {
+			LOG_WARN("CHUNK_REWRITE", "Failed to fossilize the chunk %s; it is left as it is: %v", chunkID, err)
+			return
+		}
+		LOG_TRACE("CHUNK_REWRITE", "The existing chunk %s has been marked as a fossil for rewrite", chunkID)
+	}
+
+	if err := operator.storage.UploadFile(threadIndex, chunkPath, newChunk.GetBytes()); err != nil {
+		LOG_WARN("CHUNK_REWRITE", "Failed to re-upload the chunk %s: %v", chunkID, err)
+		if movedPath != "" {
+			if err = operator.storage.MoveFile(threadIndex, movedPath, chunkPath); err != nil {
+				LOG_WARN("CHUNK_REWRITE", "Failed to restore the chunk %s from %s: %v", chunkID, movedPath, err)
+			}
+		}
+		return
+	}
+
+	LOG_INFO("CHUNK_REWRITE", "The chunk %s has been re-uploaded", chunkID)
+	if movedPath != "" {
+		operator.collectionLock.Lock()
+		operator.fossils = append(operator.fossils, movedPath)
+		operator.collectionLock.Unlock()
+	}
 }

@@ -7,6 +7,7 @@ package duplicacy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -578,6 +579,76 @@ func TestCopySnapshots(t *testing.T) {
 		restored, _ := os.ReadFile(filepath.Join(top, "file"+string(rune('a'+i))))
 		if !bytes.Equal(restored, fixtureBytes(30000, uint32(20+i))) {
 			t.Errorf("file%c was not copied correctly", 'a'+i)
+		}
+	}
+}
+
+// failingUploadStorage is a file storage whose uploads fail.
+type failingUploadStorage struct {
+	*FileStorage
+}
+
+func (storage *failingUploadStorage) UploadFile(threadIndex int, filePath string, content []byte) error {
+	return fmt.Errorf("simulated upload failure")
+}
+
+// B16: 'check -rewrite' moved a recoverable chunk aside as a fossil before uploading the repaired copy; if the
+// upload failed, the chunk was left only as a fossil.
+func TestRewriteChunkRollsBack(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	data := bytes.Repeat([]byte("rewrite me "), 2000)
+	config, encoded := erasureCodedChunk(t, data)
+	// Damage one data shard so that the chunk can only be read through recovery, which asks for a rewrite
+	encoded[len(ERASURE_CODING_BANNER)+14+7*32+5] ^= 0xff
+
+	hasher := CreateChunk(config, true)
+	hasher.Reset(true)
+	hasher.Write(data)
+	chunkHash := hasher.GetHash()
+	chunkID := config.GetChunkIDFromHash(chunkHash)
+
+	for _, failing := range []bool{true, false} {
+		fileStorage, err := CreateFileStorage(t.TempDir(), false, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fileStorage.SetDefaultNestingLevels([]int{1}, 1)
+		fileStorage.CreateDirectory(0, "chunks")
+		chunkPath, _, _, _ := fileStorage.FindChunk(0, chunkID, false, false)
+		if err = fileStorage.UploadFile(0, chunkPath, encoded); err != nil {
+			t.Fatal(err)
+		}
+
+		var storage Storage = fileStorage
+		if failing {
+			storage = &failingUploadStorage{fileStorage}
+		}
+		operator := CreateChunkOperator(config, storage, nil, false, true, 1, false)
+		chunk := operator.Download(chunkHash, 0, false)
+		operator.Stop()
+		if !bytes.Equal(chunk.GetBytes(), data) {
+			t.Fatalf("failing=%v: the chunk was not recovered", failing)
+		}
+
+		stored, err := os.ReadFile(filepath.Join(fileStorage.storageDir, chunkPath))
+		if err != nil {
+			t.Fatalf("failing=%v: the chunk no longer exists: %v", failing, err)
+		}
+		_, fossilErr := os.Stat(filepath.Join(fileStorage.storageDir, chunkPath+".fsl"))
+		if failing {
+			if !bytes.Equal(stored, encoded) || fossilErr == nil {
+				t.Error("After a failed rewrite the original chunk was not put back")
+			}
+		} else {
+			if bytes.Equal(stored, encoded) || fossilErr != nil {
+				t.Error("The chunk was not rewritten, or the old copy was not kept as a fossil")
+			}
+			if _, err := decodeChunk(config, stored); err != nil {
+				t.Errorf("The rewritten chunk can't be decoded: %v", err)
+			}
 		}
 	}
 }
