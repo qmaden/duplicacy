@@ -888,7 +888,7 @@ func DecodeEntryWithHash(decoder *msgpack.Decoder) (*Entry, error) {
 func (entry *Entry) check(chunkLengths []int) error {
 
 	if entry.Size < 0 {
-		return fmt.Errorf("The file %s hash an invalid size (%d)", entry.Path, entry.Size)
+		return fmt.Errorf("The file %s has an invalid size (%d)", entry.Path, entry.Size)
 	}
 
 	if !entry.IsFile() || entry.Size == 0 {

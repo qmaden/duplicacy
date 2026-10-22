@@ -1464,7 +1464,10 @@ func (manager *BackupManager) RestoreFile(chunkDownloader *ChunkDownloader, chun
 		hasher := manager.config.NewFileHasher()
 
 		var localChunk *Chunk
-		defer chunkDownloader.operator.config.PutChunk(localChunk)
+		// localChunk is only allocated later, so it must be read when the function returns
+		defer func() {
+			chunkDownloader.operator.config.PutChunk(localChunk)
+		}()
 
 		var offset int64
 		for i := entry.StartChunk; i <= entry.EndChunk; i++ {

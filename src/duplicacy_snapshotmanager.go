@@ -1441,7 +1441,7 @@ func (manager *SnapshotManager) RetrieveFile(snapshot *Snapshot, file *Entry, la
 	if alternateHash {
 		fileHash = "#" + fileHash
 	}
-	if strings.ToLower(fileHash) != strings.ToLower(file.Hash) && !SkipFileHash {
+	if !strings.EqualFold(fileHash, file.Hash) && !SkipFileHash {
 		LOG_WARN("SNAPSHOT_HASH", "File %s has mismatched hashes: %s vs %s", file.Path, file.Hash, fileHash)
 		return false
 	}
@@ -1848,6 +1848,7 @@ func (manager *SnapshotManager) resurrectChunk(fossilPath string, chunkID string
 
 // PruneSnapshots deletes snapshots by revisions, tags, or a retention policy.  The main idea is two-step
 // fossil collection.
+//
 //  1. Delete snapshots specified by revision, retention policy, with a tag.  Find any resulting unreferenced
 //     chunks, and mark them as fossils (by renaming).  After that, create a fossil collection file containing
 //     fossils collected during current run, and temporary files encountered.  Also in the file is the latest
@@ -2583,67 +2584,30 @@ func (manager *SnapshotManager) CheckSnapshot(snapshot *Snapshot) (err error) {
 			numberOfChunks, len(snapshot.ChunkLengths))
 	}
 
+	misorderedEntries := 0
+
 	snapshot.ListRemoteFiles(manager.config, manager.chunkOperator, func(entry *Entry) bool {
 
+		// This check never took effect in earlier versions, so a violation is only reported for now rather than
+		// failing snapshots that can otherwise be restored
 		if lastEntry != nil && lastEntry.Compare(entry) >= 0 && !strings.Contains(lastEntry.Path, "\ufffd") {
-			err = fmt.Errorf("The entry %s appears before the entry %s", lastEntry.Path, entry.Path)
-			return false
+			if misorderedEntries < 10 {
+				LOG_WARN("SNAPSHOT_ORDER", "The entry %s appears before the entry %s", lastEntry.Path, entry.Path)
+			}
+			misorderedEntries++
 		}
 		lastEntry = entry
 
-		if !entry.IsFile() || entry.Size == 0 {
-			return true
-		}
-
-		if entry.StartChunk < 0 {
-			err = fmt.Errorf("The file %s starts at chunk %d", entry.Path, entry.StartChunk)
-			return false
-		}
-
-		if entry.EndChunk >= numberOfChunks {
-			err = fmt.Errorf("The file %s ends at chunk %d while the number of chunks is %d",
-				entry.Path, entry.EndChunk, numberOfChunks)
-			return false
-		}
-
-		if entry.EndChunk < entry.StartChunk {
-			fmt.Errorf("The file %s starts at chunk %d and ends at chunk %d",
-				entry.Path, entry.StartChunk, entry.EndChunk)
-			return false
-		}
-
-		if entry.StartChunk == entry.EndChunk && entry.StartOffset > entry.EndOffset {
-			err = fmt.Errorf("The file %s starts at offset %d and ends at offset %d of the same chunk %d",
-				entry.Path, entry.StartOffset, entry.EndOffset, entry.StartChunk)
-			return false
-		}
-
-		fileSize := int64(0)
-
-		for i := entry.StartChunk; i <= entry.EndChunk; i++ {
-
-			start := 0
-			if i == entry.StartChunk {
-				start = entry.StartOffset
-			}
-			end := snapshot.ChunkLengths[i]
-			if i == entry.EndChunk {
-				end = entry.EndOffset
-			}
-
-			fileSize += int64(end - start)
-		}
-
-		if entry.Size != fileSize {
-			err = fmt.Errorf("The file %s has a size of %d but the total size of chunks is %d",
-				entry.Path, entry.Size, fileSize)
-			return false
-		}
-
-		return true
+		err = entry.check(snapshot.ChunkLengths)
+		return err == nil
 	})
 
-	return nil
+	if misorderedEntries > 0 {
+		LOG_WARN("SNAPSHOT_ORDER", "Snapshot %s at revision %d has %d entries out of order", snapshot.ID,
+			snapshot.Revision, misorderedEntries)
+	}
+
+	return err
 }
 
 // DownloadFile downloads a non-chunk file from the storage.  The only non-chunk files in the current implementation

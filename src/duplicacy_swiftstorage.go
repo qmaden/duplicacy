@@ -113,7 +113,10 @@ func CreateSwiftStorage(storageURL string, key string, threads int) (storage *Sw
 		arguments["protocol"] = "https"
 	}
 
-	ctx, _ := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	// The timeout applies to the initial authentication only; every later request has its own timeout set by
+	// connection.Timeout, so the storage keeps a context without a deadline for them.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
 
 	// Please refer to https://godoc.org/github.com/ncw/swift#Connection
 	connection := swift.Connection{
@@ -149,7 +152,7 @@ func CreateSwiftStorage(storageURL string, key string, threads int) (storage *Sw
 	}
 
 	storage = &SwiftStorage{
-		ctx:        ctx,
+		ctx:        context.Background(),
 		connection: &connection,
 		container:  container,
 		storageDir: storageDir,

@@ -355,6 +355,9 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 		if operator.allowFailures {
 			chunk.isBroken = true
 			task.completionFunc(chunk, task.chunkIndex)
+			// The chunk now belongs to the caller; it must not also be returned to the pool by the deferred
+			// PutChunk, or two goroutines would end up sharing it
+			chunk = nil
 		}
 	}
 
