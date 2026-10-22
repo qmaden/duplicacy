@@ -644,7 +644,7 @@ func (chunk *Chunk) Decrypt(encryptionKey []byte, derivationKey string) (err err
 
 		if encryptionVersion == ENCRYPTION_VERSION_RSA {
 			if chunk.config.rsaPrivateKey == nil {
-				LOG_ERROR("CHUNK_DECRYPT", "An RSA private key is required to decrypt the chunk")
+				// Callers report the error; LOG_ERROR here would end the process before they could
 				return fmt.Errorf("An RSA private key is required to decrypt the chunk"), false
 			}
 
