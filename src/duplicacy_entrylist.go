@@ -464,17 +464,15 @@ func (entryList *EntryList) CalculateChecksum() string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-// Check if all chunks exist in 'chunkCache'
-func (entryList *EntryList) CheckChunks(config *Config, chunkCache map[string]bool) bool {
+// Check if all chunks exist, according to 'exists' which takes a chunk id
+func (entryList *EntryList) CheckChunks(config *Config, exists func(chunkID string) bool) bool {
 	for _, chunkHash := range entryList.UploadedChunkHashes {
-		chunkID := config.GetChunkIDFromHash(chunkHash)
-		if _, ok := chunkCache[chunkID]; !ok {
+		if !exists(config.GetChunkIDFromHash(chunkHash)) {
 			return false
 		}
 	}
 	for _, chunkHash := range entryList.PreservedChunkHashes {
-		chunkID := config.GetChunkIDFromHash(chunkHash)
-		if _, ok := chunkCache[chunkID]; !ok {
+		if !exists(config.GetChunkIDFromHash(chunkHash)) {
 			return false
 		}
 	}

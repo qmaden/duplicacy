@@ -5,6 +5,7 @@
 package duplicacy
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -167,5 +168,80 @@ func TestFailedDownloadIsNotReturnedToPool(t *testing.T) {
 		default:
 		}
 		break
+	}
+}
+
+// B2: with metadata chunks stored separately, a file chunk with the same id as a metadata chunk of the previous
+// snapshot was assumed to exist and never uploaded to the chunk directory, so the file couldn't be restored.
+func TestSeparateMetadataDoesNotHideFileChunks(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	testDir := t.TempDir()
+	storageDir := filepath.Join(testDir, "storage")
+	storage, err := CreateFileStorage(storageDir, false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ConfigStorage(storage, CONFIG_DEFAULT_ITERATIONS, DEFAULT_COMPRESSION_LEVEL, 4096, 16384, 1024, "", nil, false, "", 0, 0) {
+		t.Fatal("Failed to initialize the storage")
+	}
+	if err = storage.UploadFile(0, "nesting", []byte(`{"read-levels":[1],"write-level":1,"separate-metadata":true}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	repository := filepath.Join(testDir, "repository")
+	os.MkdirAll(filepath.Join(repository, DUPLICACY_DIRECTORY), 0700)
+	os.WriteFile(filepath.Join(repository, "a.bin"), fixtureBytes(30000, 7), 0600)
+	os.WriteFile(filepath.Join(repository, "b.txt"), []byte("small file\n"), 0600)
+
+	backup := func(quickMode bool) *BackupManager {
+		SetDuplicacyPreferencePath(filepath.Join(repository, DUPLICACY_DIRECTORY))
+		storage, err := CreateFileStorage(storageDir, false, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manager := CreateBackupManager("test", storage, repository, "", "", "", false)
+		manager.SetupSnapshotCache("default")
+		if !manager.Backup(repository, quickMode, 1, "", false, false, 0, false, 1024, 1024) {
+			t.Fatal("Backup failed")
+		}
+		return manager
+	}
+	manager := backup(false)
+
+	// Find a metadata chunk of revision 1 that is smaller than the minimum chunk size: a new file with exactly
+	// this content becomes a single file chunk with the same id
+	snapshot := manager.SnapshotManager.DownloadSnapshot("test", 1)
+	var content []byte
+	sequences := append(append(append([]string{}, snapshot.FileSequence...), snapshot.ChunkSequence...), snapshot.LengthSequence...)
+	for _, hash := range sequences {
+		if data := manager.SnapshotManager.DownloadSequence([]string{hash}); len(data) > 0 && len(data) < 1024 {
+			content = data
+			break
+		}
+	}
+	if content == nil {
+		t.Fatal("No small metadata chunk found")
+	}
+	os.WriteFile(filepath.Join(repository, "same-as-metadata.bin"), content, 0600)
+	backup(true)
+
+	top := filepath.Join(testDir, "restore")
+	os.MkdirAll(filepath.Join(top, DUPLICACY_DIRECTORY), 0700)
+	SetDuplicacyPreferencePath(filepath.Join(top, DUPLICACY_DIRECTORY))
+	storage, err = CreateFileStorage(storageDir, false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreManager := CreateBackupManager("test", storage, top, "", "", "", false)
+	restoreManager.SetupSnapshotCache("default")
+	if failed := restoreManager.Restore(top, 2, true, false, 1, true, false, false, false, nil, false); failed != 0 {
+		t.Fatalf("%d files failed to restore", failed)
+	}
+	restored, err := os.ReadFile(filepath.Join(top, "same-as-metadata.bin"))
+	if err != nil || !bytes.Equal(restored, content) {
+		t.Errorf("The file with the same content as a metadata chunk was not restored correctly (error %v)", err)
 	}
 }

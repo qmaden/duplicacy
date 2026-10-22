@@ -168,15 +168,17 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 	hashMode := remoteSnapshot.Revision == 0 || !quickMode
 
 	// This cache contains all chunks referenced by last snasphot. Any other chunks will lead to a call to
-	// UploadChunk.
+	// UploadChunk.  It is keyed by the chunk directory followed by the chunk id: when metadata chunks are stored
+	// separately, a metadata chunk doesn't make a file chunk with the same id exist, and vice versa.
 	chunkCache := make(map[string]bool)
+	fileChunkDir := manager.storage.GetChunkDirectory(false)
 
 	// A revision number of 0 means this is the initial backup
 	if remoteSnapshot.Revision > 0 {
 		manager.SnapshotManager.DownloadSnapshotSequences(remoteSnapshot)
 		// Add all chunks in the last snapshot to the cache
-		for _, chunkID := range manager.SnapshotManager.GetSnapshotChunks(remoteSnapshot, true) {
-			chunkCache[chunkID] = true
+		for chunkID, isMetadata := range manager.SnapshotManager.GetSnapshotChunkMap(remoteSnapshot, true) {
+			chunkCache[manager.storage.GetChunkDirectory(isMetadata)+chunkID] = true
 		}
 	}
 
@@ -201,11 +203,13 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			}
 
 			chunk = strings.Replace(chunk, "/", "", -1)
-			chunkCache[chunk] = true
+			chunkCache[chunkDir+chunk] = true
 		}
 
 		// Make sure that all chunks in the incomplete snapshot must exist in the storage
-		if incompleteSnapshot != nil && !incompleteSnapshot.CheckChunks(manager.config, chunkCache) {
+		if incompleteSnapshot != nil && !incompleteSnapshot.CheckChunks(manager.config, func(chunkID string) bool {
+			return chunkCache[fileChunkDir+chunkID]
+		}) {
 			LOG_WARN("INCOMPLETE_DISCARD", "The incomplete snapshot can't be used as it contains chunks not in the storage")
 			incompleteSnapshot = nil
 		}
@@ -446,7 +450,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 
 		chunkIndex++
 
-		_, found := chunkCache[chunkID]
+		_, found := chunkCache[fileChunkDir+chunkID]
 		if found {
 			if time.Now().Unix()-lastUploadingTime > keepUploadAlive {
 				LOG_INFO("UPLOAD_KEEPALIVE", "Skip chunk cache to keep connection alive")
@@ -458,7 +462,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			uploadChunkCompletionFunc(chunk, chunkIndex, true, chunkSize, 0)
 		} else {
 			lastUploadingTime = time.Now().Unix()
-			chunkCache[chunkID] = true
+			chunkCache[fileChunkDir+chunkID] = true
 
 			chunkOperator.Upload(chunk, chunkIndex, false)
 		}
@@ -1083,11 +1087,12 @@ func (manager *BackupManager) UploadSnapshot(chunkOperator *ChunkOperator, top s
 		chunkIndex++
 		totalMetadataChunkSize += int64(chunkSize)
 
-		_, found := chunkCache[chunkID]
+		cacheKey := manager.storage.GetChunkDirectory(true) + chunkID
+		_, found := chunkCache[cacheKey]
 		if found {
 			uploadCompletionFunc(chunk, chunkIndex, true, chunkSize, 0)
 		} else {
-			chunkCache[chunkID] = true
+			chunkCache[cacheKey] = true
 			chunkOperator.Upload(chunk, chunkIndex, true)
 		}
 
