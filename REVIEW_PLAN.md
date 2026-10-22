@@ -3,6 +3,46 @@
 Repository: https://github.com/qmaden/duplicacy (HEAD `5debf42`, 833 commits, about 26k lines of Go)
 Reviewed: 2026-10-22
 
+## Implementation status (updated 2026-10-22)
+
+**Phases 0, 1 and 2 are implemented** on branch `go-1.27-wronghighwayhash`, one commit per item. Every fix has a
+regression test that fails without it, where one was practical. The full suite passes with the race detector.
+
+| Phase | Item | Commit |
+|-------|------|--------|
+| 0 | Toolchain go1.26.10; Go 1.27 unblocked (`internal/wronghighwayhash`) | `cbaf987` |
+| 0 | gofmt on all sources (formatting only) | `e615784` |
+| 0 | Golden-fixture restore tests: 9 storage formats, 2 revisions each | `619970b` |
+| 0 | GitHub Actions CI (Linux, macOS, storage options, Go 1.27, lint, govulncheck) | `1f6837f` |
+| 0 | AGENTS.md, CLAUDE.md, CONTRIBUTING, CHANGELOG, BUILDING/TESTING docs, templates, ACKNOWLEDGEMENTS | `15c2095` |
+| 1 | B1 check errors, N1 chunk double ownership, P1 restore leak, N2 Swift timeout | `048818c` |
+| 1 | go vet/staticcheck findings: config tags, Samba IPv6, FileFabric, S10 script log | `162a56e` |
+| 1 | S1 restore path and symlink safety, setuid only with owner | `3018ba8` |
+| 1 | B3/S5 erasure-coding header validation, decompression limits | `fd6e21b` |
+| 1 | B2 separate-metadata dedup | `e4f4e5f` |
+| 1 | N5 `backup -strict` (exit code 4) | `7d5cf7a` |
+| 2 | S2 SFTP host keys by host name via known_hosts, S8 sftpc warning, dial timeout | `438603c` |
+| 2 | S3 token files, S9 private cache, S6 masked secrets | `cef7982` |
+| 2 | S4 600k iterations, iteration cap, safe `password` command | `1dd192f` |
+| 2 | S7 RSA keys (OpenSSH, PKCS#8), inline keys not logged | `4774372` |
+| 2 | Fuzz targets; docs FORMAT, SECURITY_MODEL, SECURITY, UPGRADING | (next commits) |
+
+**New findings while implementing:**
+
+- B1 was worse than reported: `CheckSnapshot` ended with `return nil`, discarding *every* error. Version 1
+  snapshots are validated while decoding anyway; version 0 (JSON) snapshots were not, and `check -files` then
+  crashed on them.
+- `duplicacy password` deleted the storage's config before uploading the new one and ignored failures; a password
+  shorter than 8 characters left the storage without a config. Fixed in `1dd192f`.
+- RSA key errors printed the key itself when it was passed inline. Fixed in `4774372`.
+- `Config.UnmarshalJSON` panicked on a non-RSA public key, and `Chunk.Decrypt` called `LOG_ERROR` (process exit)
+  for RSA chunks without a private key. Both fixed.
+- Supported platforms were narrowed to Linux x86-64 and macOS at the owner's request; CI no longer builds Windows.
+
+**Still open** (Phase 3 onward): B4 resume verification, B5 re-verification of chunks, B6 prune clock margin and
+lock, B7 retention policy sorting, N6 restore over a changed file type (upstream #429), N7 read errors aborting
+backups (upstream #309), N8–N12, and the performance work in section 9.
+
 ## 0. What was done
 
 - Read all the core code: chunk/crypto (`duplicacy_chunk.go`, `duplicacy_config.go`), the chunk pipeline (`chunkoperator`, `chunkdownloader`, `chunkmaker`), backup/restore/copy (`backupmanager`), check/prune (`snapshotmanager`), entries (`entry`, `entrylist`, `snapshot`), and the storage layer (`storage`, `filestorage`, `sftpstorage`). Skimmed the cloud backends and the CLI (`duplicacy_main.go`).

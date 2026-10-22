@@ -52,6 +52,9 @@ a git-ignored `src/test_storage.conf` are provided.
 
 Do **not** build with `-tags noasm` and don't add assembly. See `docs/BUILDING.md`.
 
+Exit codes of the CLI: 0 success, 1 interrupted, 2 invalid command, 3 invalid arguments, 4 `backup -strict` with
+skipped entries, 100 an error logged with `LOG_ERROR`, 101 an unexpected panic.
+
 ## Compatibility invariants
 
 Never change these without a format-version plan, new fixtures, and a reviewed design (see `docs/FORMAT.md`):
