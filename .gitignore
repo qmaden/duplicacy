@@ -1,0 +1,14 @@
+# Build outputs
+/duplicacy_main
+/duplicacy/duplicacy
+*.test
+*.prof
+*.pb.gz
+
+# Credentials for storage backend tests (never commit)
+src/test_storage.conf
+
+# Local tooling
+.DS_Store
+.idea/
+.vscode/
