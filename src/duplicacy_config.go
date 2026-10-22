@@ -54,8 +54,19 @@ var CONFIG_BANNER = "duplicacy\001"
 // The length of the salt used in the new format
 var CONFIG_SALT_LENGTH = 32
 
-// The default iterations for key derivation
-var CONFIG_DEFAULT_ITERATIONS = 16384
+// The default iterations for key derivation for new storages, following the current OWASP recommendation for
+// PBKDF2-HMAC-SHA256.  The number is stored in the config file, so existing storages are not affected.
+var CONFIG_DEFAULT_ITERATIONS = 600000
+
+// The fixed number of iterations of the old config format (static salt), and the default before this fork
+var CONFIG_LEGACY_ITERATIONS = 16384
+
+// Iteration counts below this are reported as weak
+var CONFIG_RECOMMENDED_MINIMUM_ITERATIONS = 100000
+
+// The largest iteration count accepted from a config file; a corrupted or crafted config could otherwise make the
+// key derivation run practically forever
+var CONFIG_MAXIMUM_ITERATIONS = 100000000
 
 type Config struct {
 	CompressionLevel int `json:"compression-level"`
@@ -434,8 +445,8 @@ func DownloadConfig(storage Storage, password string) (config *Config, isEncrypt
 
 		if string(configFile.GetBytes()[:len(ENCRYPTION_BANNER)]) == ENCRYPTION_BANNER {
 			// This is the old config format with a static salt and a fixed number of iterations
-			masterKey = GenerateKeyFromPassword(password, DEFAULT_KEY, CONFIG_DEFAULT_ITERATIONS)
-			LOG_TRACE("CONFIG_FORMAT", "Using a static salt and %d iterations for key derivation", CONFIG_DEFAULT_ITERATIONS)
+			masterKey = GenerateKeyFromPassword(password, DEFAULT_KEY, CONFIG_LEGACY_ITERATIONS)
+			LOG_TRACE("CONFIG_FORMAT", "Using a static salt and %d iterations for key derivation", CONFIG_LEGACY_ITERATIONS)
 		} else if string(configFile.GetBytes()[:len(CONFIG_BANNER)]) == CONFIG_BANNER {
 			// This is the new config format with a random salt and a configurable number of iterations
 			encryptedLength := len(configFile.GetBytes()) - CONFIG_SALT_LENGTH - 4
@@ -444,6 +455,10 @@ func DownloadConfig(storage Storage, password string) (config *Config, isEncrypt
 			saltStart := configFile.GetBytes()[len(CONFIG_BANNER):]
 			iterations := binary.LittleEndian.Uint32(saltStart[CONFIG_SALT_LENGTH : CONFIG_SALT_LENGTH+4])
 			LOG_TRACE("CONFIG_ITERATIONS", "Using %d iterations for key derivation", iterations)
+			if uint64(iterations) > uint64(CONFIG_MAXIMUM_ITERATIONS) {
+				return nil, true, fmt.Errorf("The config file specifies %d iterations for key derivation, more than the maximum of %d",
+					iterations, CONFIG_MAXIMUM_ITERATIONS)
+			}
 			masterKey = GenerateKeyFromPassword(password, saltStart[:CONFIG_SALT_LENGTH], int(iterations))
 
 			// Copy to a temporary buffer to replace the banner and remove the salt and the number of riterations
@@ -480,7 +495,17 @@ func DownloadConfig(storage Storage, password string) (config *Config, isEncrypt
 
 }
 
-func UploadConfig(storage Storage, config *Config, password string, iterations int) bool {
+// configError carries the log id that UploadConfig reports a failure with.
+type configError struct {
+	logID string
+	err   error
+}
+
+func (e *configError) Error() string { return e.err.Error() }
+
+// SaveConfig encrypts the config with 'password' (if not empty) and uploads it to the storage as 'config'.
+// Unlike UploadConfig it returns errors instead of logging them, so that callers can recover from a failure.
+func SaveConfig(storage Storage, config *Config, password string, iterations int) error {
 
 	// This is the key to encrypt the config file.
 	var masterKey []byte
@@ -489,14 +514,23 @@ func UploadConfig(storage Storage, config *Config, password string, iterations i
 	if len(password) > 0 {
 
 		if len(password) < 8 {
-			LOG_ERROR("CONFIG_PASSWORD", "The password must be at least 8 characters")
-			return false
+			return &configError{"CONFIG_PASSWORD", fmt.Errorf("The password must be at least 8 characters")}
+		}
+		if iterations < 1 || iterations > CONFIG_MAXIMUM_ITERATIONS {
+			return &configError{"CONFIG_ITERATIONS", fmt.Errorf("The number of iterations must be between 1 and %d",
+				CONFIG_MAXIMUM_ITERATIONS)}
+		}
+		if len(password) < 12 {
+			LOG_WARN("CONFIG_PASSWORD", "A password of at least 12 characters is recommended")
+		}
+		if iterations < CONFIG_RECOMMENDED_MINIMUM_ITERATIONS {
+			LOG_WARN("CONFIG_ITERATIONS", "%d iterations is weak for key derivation; at least %d are recommended",
+				iterations, CONFIG_RECOMMENDED_MINIMUM_ITERATIONS)
 		}
 
 		_, err := rand.Read(salt)
 		if err != nil {
-			LOG_ERROR("CONFIG_KEY", "Failed to generate random salt: %v", err)
-			return false
+			return &configError{"CONFIG_KEY", fmt.Errorf("Failed to generate random salt: %v", err)}
 		}
 
 		masterKey = GenerateKeyFromPassword(password, salt, iterations)
@@ -504,8 +538,7 @@ func UploadConfig(storage Storage, config *Config, password string, iterations i
 
 	description, err := json.MarshalIndent(config, "", "    ")
 	if err != nil {
-		LOG_ERROR("CONFIG_MARSHAL", "Failed to marshal the config: %v", err)
-		return false
+		return &configError{"CONFIG_MARSHAL", fmt.Errorf("Failed to marshal the config: %v", err)}
 	}
 
 	// Although the default key is passed to the function call the key is not actually used since there is no need to
@@ -517,8 +550,7 @@ func UploadConfig(storage Storage, config *Config, password string, iterations i
 		// Encrypt the config file with masterKey.  If masterKey is nil then no encryption is performed.
 		err = chunk.Encrypt(masterKey, "", true)
 		if err != nil {
-			LOG_ERROR("CONFIG_CREATE", "Failed to create the config file: %v", err)
-			return false
+			return &configError{"CONFIG_CREATE", fmt.Errorf("Failed to create the config file: %v", err)}
 		}
 
 		// The new encrypted format for config is CONFIG_BANNER + salt + #iterations + encrypted content
@@ -534,22 +566,35 @@ func UploadConfig(storage Storage, config *Config, password string, iterations i
 		chunk.Reset(false)
 		chunk.Write(encrypted.Bytes())
 		if len(chunk.GetBytes()) != encryptedLength {
-			LOG_ERROR("CONFIG_CREATE", "Encrypted config has %d bytes instead of expected %d bytes", len(chunk.GetBytes()), encryptedLength)
+			return &configError{"CONFIG_CREATE", fmt.Errorf("Encrypted config has %d bytes instead of expected %d bytes",
+				len(chunk.GetBytes()), encryptedLength)}
 		}
 	}
 
 	err = storage.UploadFile(0, "config", chunk.GetBytes())
 	if err != nil {
-		LOG_ERROR("CONFIG_INIT", "Failed to configure the storage: %v", err)
-		return false
+		return &configError{"CONFIG_INIT", fmt.Errorf("Failed to configure the storage: %v", err)}
 	}
 
 	if IsTracing() {
 		config.Print()
 	}
+	return nil
+}
+
+func UploadConfig(storage Storage, config *Config, password string, iterations int) bool {
+
+	if err := SaveConfig(storage, config, password, iterations); err != nil {
+		logID := "CONFIG_INIT"
+		if e, ok := err.(*configError); ok {
+			logID = e.logID
+		}
+		LOG_ERROR(logID, "%v", err)
+		return false
+	}
 
 	for _, subDir := range []string{"chunks", "snapshots"} {
-		err = storage.CreateDirectory(0, subDir)
+		err := storage.CreateDirectory(0, subDir)
 		if err != nil {
 			LOG_ERROR("CONFIG_MKDIR", "Failed to create storage subdirectory: %v", err)
 		}

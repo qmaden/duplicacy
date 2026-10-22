@@ -272,7 +272,7 @@ func writeLegacyConfig(t *testing.T, storage Storage, password string) {
 	}
 	chunk := CreateChunk(CreateConfig(), true)
 	chunk.Write(description)
-	masterKey := GenerateKeyFromPassword(password, DEFAULT_KEY, CONFIG_DEFAULT_ITERATIONS)
+	masterKey := GenerateKeyFromPassword(password, DEFAULT_KEY, CONFIG_LEGACY_ITERATIONS)
 	if err = chunk.Encrypt(masterKey, "", true); err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func TestGenerateFixtures(t *testing.T) {
 		if variant.rsa {
 			keyFile = publicKeyPEM
 		}
-		if !ConfigStorage(storage, CONFIG_DEFAULT_ITERATIONS, variant.compressionLevel, average, maximum, minimum,
+		if !ConfigStorage(storage, CONFIG_LEGACY_ITERATIONS, variant.compressionLevel, average, maximum, minimum,
 			variant.password(), nil, false, keyFile, variant.dataShards, variant.parityShards) {
 			t.Fatalf("Failed to initialize the storage for %s", variant.name)
 		}

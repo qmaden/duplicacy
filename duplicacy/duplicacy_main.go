@@ -692,14 +692,21 @@ func changePassword(context *cli.Context) {
 		duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The new passwords do not match")
 		return
 	}
-	if newPassword == password {
-		duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The new password is the same as the old one")
+	iterations := context.Int("iterations")
+	if newPassword == password && iterations == 0 {
+		// Keeping the password is allowed when only the key derivation is being changed
+		duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The new password is the same as the old one; specify -iterations to "+
+			"only change the number of iterations")
 		return
 	}
-
-	iterations := context.Int("iterations")
 	if iterations == 0 {
 		iterations = duplicacy.CONFIG_DEFAULT_ITERATIONS
+	}
+
+	// Check the new password before the old config is deleted from the storage
+	if len(newPassword) < 8 {
+		duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The password must be at least 8 characters")
+		return
 	}
 
 	description, err := json.MarshalIndent(config, "", "    ")
@@ -734,7 +741,17 @@ func changePassword(context *cli.Context) {
 		return
 	}
 
-	duplicacy.UploadConfig(storage, config, newPassword, iterations)
+	if err = duplicacy.SaveConfig(storage, config, newPassword, iterations); err != nil {
+		// The storage has no config now; put it back with the old password
+		duplicacy.LOG_WARN("PASSWORD_CHANGE", "Failed to save the config with the new password: %v", err)
+		if restoreErr := duplicacy.SaveConfig(storage, config, password, iterations); restoreErr == nil {
+			duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The password was not changed; the old password is still in effect")
+		} else {
+			duplicacy.LOG_ERROR("PASSWORD_CHANGE", "Failed to restore the config (%v); it can be restored from %s",
+				restoreErr, configPath)
+		}
+		return
+	}
 
 	duplicacy.SavePassword(*preference, "password", newPassword)
 
@@ -1469,7 +1486,7 @@ func main() {
 				},
 				cli.IntFlag{
 					Name:     "iterations",
-					Usage:    "the number of iterations used in storage key derivation (default is 16384)",
+					Usage:    "the number of iterations used in storage key derivation (default is 600000)",
 					Argument: "<i>",
 				},
 				cli.StringFlag{
@@ -1957,7 +1974,7 @@ func main() {
 				},
 				cli.IntFlag{
 					Name:     "iterations",
-					Usage:    "the number of iterations used in storage key derivation (default is 16384)",
+					Usage:    "the number of iterations used in storage key derivation (default is 600000)",
 					Argument: "<i>",
 				},
 			},
@@ -2000,7 +2017,7 @@ func main() {
 				},
 				cli.IntFlag{
 					Name:     "iterations",
-					Usage:    "the number of iterations used in storage key derivation (default is 16384)",
+					Usage:    "the number of iterations used in storage key derivation (default is 600000)",
 					Argument: "<i>",
 				},
 				cli.StringFlag{
