@@ -14,7 +14,7 @@ import (
 	ole "github.com/gilbertchen/go-ole"
 )
 
-//507C37B4-CF5B-4e95-B0AF-14EB9767467E
+// 507C37B4-CF5B-4e95-B0AF-14EB9767467E
 var IID_IVSS_ASYNC = &ole.GUID{0x507C37B4, 0xCF5B, 0x4e95, [8]byte{0xb0, 0xaf, 0x14, 0xeb, 0x97, 0x67, 0x46, 0x7e}}
 
 type IVSSAsync struct {
@@ -77,7 +77,7 @@ func getIVSSAsync(unknown *ole.IUnknown, iid *ole.GUID) (async *IVSSAsync) {
 	return
 }
 
-//665c1d5f-c218-414d-a05d-7fef5f9d5c86
+// 665c1d5f-c218-414d-a05d-7fef5f9d5c86
 var IID_IVSS = &ole.GUID{0x665c1d5f, 0xc218, 0x414d, [8]byte{0xa0, 0x5d, 0x7f, 0xef, 0x5f, 0x9d, 0x5c, 0x86}}
 
 type IVSS struct {

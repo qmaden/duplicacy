@@ -29,11 +29,10 @@ type ChunkDownloadCompletion struct {
 // corresponding ChunkDownloadTask is sent to the dowloading goroutine.  Once a chunk is downloaded, it will be
 // inserted in the completed task list.
 type ChunkDownloader struct {
+	operator *ChunkOperator
 
-	operator                  *ChunkOperator
-
-	totalChunkSize            int64 // Total chunk size
-	downloadedChunkSize       int64 // Downloaded chunk size
+	totalChunkSize      int64 // Total chunk size
+	downloadedChunkSize int64 // Downloaded chunk size
 
 	taskList       []ChunkDownloadTask // The list of chunks to be downloaded
 	completedTasks map[int]bool        // Store downloaded chunks
@@ -49,7 +48,7 @@ type ChunkDownloader struct {
 
 func CreateChunkDownloader(operator *ChunkOperator) *ChunkDownloader {
 	downloader := &ChunkDownloader{
-		operator:       operator,
+		operator: operator,
 
 		taskList:       nil,
 		completedTasks: make(map[int]bool),
@@ -114,8 +113,8 @@ func (downloader *ChunkDownloader) Prefetch(file *Entry) {
 
 				LOG_DEBUG("DOWNLOAD_PREFETCH", "Prefetching %s chunk %s", file.Path,
 					downloader.operator.config.GetChunkIDFromHash(task.chunkHash))
-				downloader.operator.DownloadAsync(task.chunkHash, i, false, func (chunk *Chunk, chunkIndex int) {
-					downloader.completionChannel <- ChunkDownloadCompletion { chunk: chunk, chunkIndex: chunkIndex }
+				downloader.operator.DownloadAsync(task.chunkHash, i, false, func(chunk *Chunk, chunkIndex int) {
+					downloader.completionChannel <- ChunkDownloadCompletion{chunk: chunk, chunkIndex: chunkIndex}
 				})
 				task.isDownloading = true
 				downloader.numberOfDownloadingChunks++
@@ -174,8 +173,8 @@ func (downloader *ChunkDownloader) WaitForChunk(chunkIndex int) (chunk *Chunk) {
 	if !downloader.taskList[chunkIndex].isDownloading {
 		LOG_DEBUG("DOWNLOAD_FETCH", "Fetching chunk %s",
 			downloader.operator.config.GetChunkIDFromHash(downloader.taskList[chunkIndex].chunkHash))
-		downloader.operator.DownloadAsync(downloader.taskList[chunkIndex].chunkHash, chunkIndex, false, func (chunk *Chunk, chunkIndex int) {
-			downloader.completionChannel <- ChunkDownloadCompletion { chunk: chunk, chunkIndex: chunkIndex }
+		downloader.operator.DownloadAsync(downloader.taskList[chunkIndex].chunkHash, chunkIndex, false, func(chunk *Chunk, chunkIndex int) {
+			downloader.completionChannel <- ChunkDownloadCompletion{chunk: chunk, chunkIndex: chunkIndex}
 		})
 		downloader.taskList[chunkIndex].isDownloading = true
 		downloader.numberOfDownloadingChunks++
@@ -194,8 +193,8 @@ func (downloader *ChunkDownloader) WaitForChunk(chunkIndex int) (chunk *Chunk) {
 
 		if !task.isDownloading {
 			LOG_DEBUG("DOWNLOAD_PREFETCH", "Prefetching chunk %s", downloader.operator.config.GetChunkIDFromHash(task.chunkHash))
-			downloader.operator.DownloadAsync(task.chunkHash, task.chunkIndex, false, func (chunk *Chunk, chunkIndex int) {
-				downloader.completionChannel <- ChunkDownloadCompletion { chunk: chunk, chunkIndex: chunkIndex }
+			downloader.operator.DownloadAsync(task.chunkHash, task.chunkIndex, false, func(chunk *Chunk, chunkIndex int) {
+				downloader.completionChannel <- ChunkDownloadCompletion{chunk: chunk, chunkIndex: chunkIndex}
 			})
 			task.isDownloading = true
 			downloader.numberOfDownloadingChunks++
@@ -228,7 +227,7 @@ func (downloader *ChunkDownloader) WaitForCompletion() {
 	}
 
 	// Looping until there isn't a download task in progress
-	for downloader.numberOfActiveChunks > 0 || downloader.lastChunkIndex + 1 < len(downloader.taskList) {
+	for downloader.numberOfActiveChunks > 0 || downloader.lastChunkIndex+1 < len(downloader.taskList) {
 
 		// Wait for a completion event first
 		if downloader.numberOfActiveChunks > 0 {
@@ -240,14 +239,14 @@ func (downloader *ChunkDownloader) WaitForCompletion() {
 		}
 
 		// Pass the tasks one by one to the download queue
-		if downloader.lastChunkIndex + 1 < len(downloader.taskList) {
-			task := &downloader.taskList[downloader.lastChunkIndex + 1]
+		if downloader.lastChunkIndex+1 < len(downloader.taskList) {
+			task := &downloader.taskList[downloader.lastChunkIndex+1]
 			if task.isDownloading {
 				downloader.lastChunkIndex++
 				continue
 			}
-			downloader.operator.DownloadAsync(task.chunkHash, task.chunkIndex, false, func (chunk *Chunk, chunkIndex int) {
-				downloader.completionChannel <- ChunkDownloadCompletion { chunk: chunk, chunkIndex: chunkIndex }
+			downloader.operator.DownloadAsync(task.chunkHash, task.chunkIndex, false, func(chunk *Chunk, chunkIndex int) {
+				downloader.completionChannel <- ChunkDownloadCompletion{chunk: chunk, chunkIndex: chunkIndex}
 			})
 			task.isDownloading = true
 			downloader.numberOfDownloadingChunks++

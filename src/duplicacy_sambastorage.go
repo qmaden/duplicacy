@@ -6,15 +6,15 @@ package duplicacy
 
 import (
 	"context"
-	"io"
-	"os"
 	"fmt"
+	"io"
+	"math/rand"
 	"net"
+	"os"
 	"path"
-	"time"
 	"strings"
 	"syscall"
-	"math/rand"
+	"time"
 
 	"github.com/cloudsoda/go-smb2"
 )
@@ -96,7 +96,7 @@ func (storage *SambaStorage) ListFiles(threadIndex int, dir string) (files []str
 
 	for _, f := range list {
 		name := f.Name()
-		if (f.IsDir() || f.Mode() & os.ModeSymlink != 0) && name[len(name)-1] != '/' {
+		if (f.IsDir() || f.Mode()&os.ModeSymlink != 0) && name[len(name)-1] != '/' {
 			name += "/"
 		}
 		files = append(files, name)
@@ -181,7 +181,7 @@ func (storage *SambaStorage) UploadFile(threadIndex int, filePath string, conten
 				return err
 			}
 		} else {
-			if !stat.IsDir() && stat.Mode() & os.ModeSymlink == 0 {
+			if !stat.IsDir() && stat.Mode()&os.ModeSymlink == 0 {
 				return fmt.Errorf("The path %s is not a directory or symlink", dir)
 			}
 		}

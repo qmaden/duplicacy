@@ -26,14 +26,13 @@ type ChunkMaker struct {
 	bufferStart int
 
 	minimumReached bool
-	hashSum uint64
-	chunk *Chunk
+	hashSum        uint64
+	chunk          *Chunk
 
 	config *Config
 
 	hashOnly      bool
 	hashOnlyChunk *Chunk
-
 }
 
 // CreateChunkMaker creates a chunk maker.  'randomSeed' is used to generate the character-to-integer table needed by

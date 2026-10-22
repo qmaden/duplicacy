@@ -2,8 +2,8 @@
 // Free for personal use and commercial trial
 // Commercial use requires per-user licenses available from https://duplicacy.com
 
-// +build !windows
-// +build !darwin
+//go:build !windows && !darwin
+// +build !windows,!darwin
 
 package duplicacy
 

@@ -18,7 +18,7 @@ const (
 	ChunkOperationDelete    = 2
 	ChunkOperationFossilize = 3
 	ChunkOperationResurrect = 4
-	ChunkOperationFind = 5
+	ChunkOperationFind      = 5
 )
 
 // ChunkTask is used to pass parameters for different kinds of chunk operations.
@@ -38,49 +38,49 @@ type ChunkTask struct {
 
 // ChunkOperator is capable of performing multi-threaded operations on chunks.
 type ChunkOperator struct {
-	config *Config               // Associated config
-	storage Storage              // This storage
+	config         *Config // Associated config
+	storage        Storage // This storage
 	snapshotCache  *FileStorage
 	showStatistics bool
-	threads  int                 // Number of threads
-	taskQueue chan ChunkTask     // Operating goroutines are waiting on this channel for input
-	stopChannel chan bool        // Used to stop all the goroutines
+	threads        int            // Number of threads
+	taskQueue      chan ChunkTask // Operating goroutines are waiting on this channel for input
+	stopChannel    chan bool      // Used to stop all the goroutines
 
-	numberOfActiveTasks int64    // The number of chunks that are being operated on
+	numberOfActiveTasks int64 // The number of chunks that are being operated on
 
-	fossils []string             // For fossilize operation, the paths of the fossils are stored in this slice
-	collectionLock *sync.Mutex   // The lock for accessing 'fossils'
+	fossils        []string    // For fossilize operation, the paths of the fossils are stored in this slice
+	collectionLock *sync.Mutex // The lock for accessing 'fossils'
 
-	startTime int64              // The time it starts downloading
-	totalChunkSize int64         // Total chunk size
-	downloadedChunkSize int64    // Downloaded chunk size
+	startTime           int64 // The time it starts downloading
+	totalChunkSize      int64 // Total chunk size
+	downloadedChunkSize int64 // Downloaded chunk size
 
-	allowFailures bool           // Whether to fail on download error, or continue
-	NumberOfFailedChunks int64   // The number of chunks that can't be downloaded
+	allowFailures        bool  // Whether to fail on download error, or continue
+	NumberOfFailedChunks int64 // The number of chunks that can't be downloaded
 
-	rewriteChunks bool           // Whether to rewrite corrupted chunks when erasure coding is enabled
+	rewriteChunks bool // Whether to rewrite corrupted chunks when erasure coding is enabled
 
 	UploadCompletionFunc func(chunk *Chunk, chunkIndex int, inCache bool, chunkSize int, uploadSize int)
 }
 
 // CreateChunkOperator creates a new ChunkOperator.
 func CreateChunkOperator(config *Config, storage Storage, snapshotCache *FileStorage, showStatistics bool, rewriteChunks bool, threads int,
-						 allowFailures bool) *ChunkOperator {
+	allowFailures bool) *ChunkOperator {
 
 	operator := &ChunkOperator{
-		config: config,
-		storage: storage,
-		snapshotCache: snapshotCache,
+		config:         config,
+		storage:        storage,
+		snapshotCache:  snapshotCache,
 		showStatistics: showStatistics,
-		threads: threads,
+		threads:        threads,
 
 		taskQueue:   make(chan ChunkTask, threads),
 		stopChannel: make(chan bool),
 
 		collectionLock: &sync.Mutex{},
-		startTime: time.Now().Unix(),
-		allowFailures: allowFailures,
-		rewriteChunks: rewriteChunks,
+		startTime:      time.Now().Unix(),
+		allowFailures:  allowFailures,
+		rewriteChunks:  rewriteChunks,
 	}
 
 	// Start the operator goroutines
@@ -124,17 +124,17 @@ func (operator *ChunkOperator) WaitForCompletion() {
 	}
 }
 
-func (operator *ChunkOperator) AddTask(operation int, chunkID string, chunkHash string, filePath string, chunkIndex int, chunk *Chunk, isMetadata bool, skipCache bool, completionFunc func(*Chunk, int))  {
+func (operator *ChunkOperator) AddTask(operation int, chunkID string, chunkHash string, filePath string, chunkIndex int, chunk *Chunk, isMetadata bool, skipCache bool, completionFunc func(*Chunk, int)) {
 
-	task := ChunkTask {
-		operation:  operation,
-		chunkID:    chunkID,
-		chunkHash:  chunkHash,
-		chunkIndex: chunkIndex,
-		filePath:   filePath,
-		chunk:      chunk,
-		isMetadata: isMetadata,
-		skipCache:  skipCache,
+	task := ChunkTask{
+		operation:      operation,
+		chunkID:        chunkID,
+		chunkHash:      chunkHash,
+		chunkIndex:     chunkIndex,
+		filePath:       filePath,
+		chunk:          chunk,
+		isMetadata:     isMetadata,
+		skipCache:      skipCache,
 		completionFunc: completionFunc,
 	}
 
@@ -161,7 +161,7 @@ func (operator *ChunkOperator) download(chunkHash string, chunkIndex int, isMeta
 		completionChannel <- chunk
 	}
 	operator.AddTask(ChunkOperationDownload, chunkID, chunkHash, "", chunkIndex, nil, isMetadata, skipCache, completionFunc)
-	return <- completionChannel
+	return <-completionChannel
 }
 
 func (operator *ChunkOperator) DownloadAsync(chunkHash string, chunkIndex int, isMetadata bool, completionFunc func(*Chunk, int)) {
@@ -310,7 +310,7 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 		if chunk != nil {
 			operator.config.PutChunk(chunk)
 		}
-	} ()
+	}()
 
 	if task.isMetadata && operator.snapshotCache != nil && !task.skipCache {
 

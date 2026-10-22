@@ -6,10 +6,10 @@ package duplicacy
 
 import (
 	"context"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"regexp"
 
 	"github.com/ncw/swift/v2"
 )
@@ -25,7 +25,7 @@ type SwiftStorage struct {
 }
 
 // CreateSwiftStorage creates an OpenStack Swift storage object.  storageURL is in the form of
-// `user@authURL/container/path?arg1=value1&arg2=value2``
+// `user@authURL/container/path?arg1=value1&arg2=value2“
 func CreateSwiftStorage(storageURL string, key string, threads int) (storage *SwiftStorage, err error) {
 
 	// This is the map to store all arguments

@@ -4,6 +4,8 @@
 package duplicacy
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,11 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"bytes"
-	"crypto/sha256"
 
-    "github.com/vmihailenco/msgpack"
-
+	"github.com/vmihailenco/msgpack"
 )
 
 // This is the hidden directory in the repository for storing various files.
@@ -110,10 +109,10 @@ func (entry *Entry) Copy() *Entry {
 		UID: entry.UID,
 		GID: entry.GID,
 
-		StartChunk: entry.StartChunk,
+		StartChunk:  entry.StartChunk,
 		StartOffset: entry.StartOffset,
-		EndChunk: entry.EndChunk,
-		EndOffset: entry.EndOffset,
+		EndChunk:    entry.EndChunk,
+		EndOffset:   entry.EndOffset,
 
 		Attributes: entry.Attributes,
 	}
@@ -362,12 +361,12 @@ func (entry *Entry) EncodeMsgpack(encoder *msgpack.Encoder) error {
 
 	if entry.Attributes != nil {
 		attributes := make([]string, numberOfAttributes)
-        i := 0
-        for attribute := range *entry.Attributes {
-            attributes[i] = attribute
-            i++
-        }
-        sort.Strings(attributes)
+		i := 0
+		for attribute := range *entry.Attributes {
+			attributes[i] = attribute
+			i++
+		}
+		sort.Strings(attributes)
 		for _, attribute := range attributes {
 			err = encoder.EncodeString(attribute)
 			if err != nil {
@@ -380,7 +379,7 @@ func (entry *Entry) EncodeMsgpack(encoder *msgpack.Encoder) error {
 		}
 	}
 
-    return nil
+	return nil
 }
 
 func (entry *Entry) DecodeMsgpack(decoder *msgpack.Decoder) error {
@@ -498,8 +497,8 @@ func (entry *Entry) GetPermissions() os.FileMode {
 
 func (entry *Entry) GetParent() string {
 	path := entry.Path
-	if path != "" && path[len(path) - 1] == '/' {
-		path = path[:len(path) - 1]
+	if path != "" && path[len(path)-1] == '/' {
+		path = path[:len(path)-1]
 	}
 	i := strings.LastIndex(path, "/")
 	if i == -1 {
@@ -596,7 +595,7 @@ func ComparePaths(left string, right string) int {
 	for i := p; i < len(left); i++ {
 		c3 = left[i]
 		if c3 == '/' {
-			last1 = i == len(left) - 1
+			last1 = i == len(left)-1
 			break
 		}
 	}
@@ -606,7 +605,7 @@ func ComparePaths(left string, right string) int {
 	for i := p; i < len(right); i++ {
 		c4 = right[i]
 		if c4 == '/' {
-			last2 = i == len(right) - 1
+			last2 = i == len(right)-1
 			break
 		}
 	}

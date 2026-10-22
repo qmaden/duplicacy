@@ -2,6 +2,7 @@
 // Free for personal use and commercial trial
 // Commercial use requires per-user licenses available from https://duplicacy.com
 
+//go:build !windows
 // +build !windows
 
 package duplicacy

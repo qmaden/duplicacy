@@ -733,7 +733,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		// Handle writing directly to the root of the drive
 		// For gcd://driveid@/, driveid@ is match[3] not match[2]
 		if matched[2] == "" && strings.HasSuffix(matched[3], "@") {
-			matched[2], matched[3]  = matched[3], matched[2]
+			matched[2], matched[3] = matched[3], matched[2]
 		}
 		driveID := matched[2]
 		if driveID != "" {
@@ -753,7 +753,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		// Handle writing directly to the root of the drive
 		// For odb://drive_id@/, drive_id@ is match[3] not match[2]
 		if matched[2] == "" && strings.HasSuffix(matched[3], "@") {
-			matched[2], matched[3]  = matched[3], matched[2]
+			matched[2], matched[3] = matched[3], matched[2]
 		}
 		drive_id := matched[2]
 		if len(drive_id) > 0 {
@@ -761,17 +761,17 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 		storagePath := matched[3] + matched[4]
 		prompt := fmt.Sprintf("Enter the path of the OneDrive token file (downloadable from https://duplicacy.com/one_start):")
-		tokenFile := GetPassword(preference, matched[1] + "_token", prompt, true, resetPassword)
+		tokenFile := GetPassword(preference, matched[1]+"_token", prompt, true, resetPassword)
 
 		// client_id, just like tokenFile, can be stored in preferences
 		//prompt = fmt.Sprintf("Enter client_id for custom Azure app (if empty will use duplicacy.com one):")
-		client_id := GetPasswordFromPreference(preference, matched[1] + "_client_id")
+		client_id := GetPasswordFromPreference(preference, matched[1]+"_client_id")
 		client_secret := ""
 
 		if client_id != "" {
 			// client_secret should go into keyring
 			prompt = fmt.Sprintf("Enter client_secret for custom Azure app (if empty will use duplicacy.com one):")
-			client_secret = GetPassword(preference, matched[1] + "_client_secret", prompt, true, resetPassword)
+			client_secret = GetPassword(preference, matched[1]+"_client_secret", prompt, true, resetPassword)
 		}
 
 		oneDriveStorage, err := CreateOneDriveStorage(tokenFile, matched[1] == "odb", storagePath, threads, client_id, client_secret, drive_id)
@@ -780,9 +780,9 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 			return nil
 		}
 
-		SavePassword(preference, matched[1] + "_token", tokenFile)
+		SavePassword(preference, matched[1]+"_token", tokenFile)
 		if client_id != "" {
-			SavePassword(preference, matched[1] + "_client_secret", client_secret)
+			SavePassword(preference, matched[1]+"_client_secret", client_secret)
 		}
 		return oneDriveStorage
 	} else if matched[1] == "hubic" {
@@ -851,7 +851,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		storageDir := ""
 		index := strings.Index(bucket, "/")
 		if index >= 0 {
-			storageDir = bucket[index + 1:]
+			storageDir = bucket[index+1:]
 			bucket = bucket[:index]
 		}
 		apiKey := GetPassword(preference, "storj_key", "Enter the API access key:", true, resetPassword)
@@ -899,7 +899,6 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 		SavePassword(preference, "smb_password", password)
 		return sambaStorage
-
 
 	} else {
 		LOG_ERROR("STORAGE_CREATE", "The storage type '%s' is not supported", matched[1])

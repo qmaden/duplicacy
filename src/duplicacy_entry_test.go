@@ -5,6 +5,8 @@
 package duplicacy
 
 import (
+	"bytes"
+	"encoding/json"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -13,11 +15,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"bytes"
-	"encoding/json"
 
 	"github.com/gilbertchen/xattr"
-    "github.com/vmihailenco/msgpack"
+	"github.com/vmihailenco/msgpack"
 )
 
 func TestEntrySort(t *testing.T) {
@@ -175,7 +175,7 @@ func TestEntryOrder(t *testing.T) {
 	directories = append(directories, CreateEntry("", 0, 0, 0))
 
 	entries := make([]*Entry, 0, 4)
-    entryChannel := make(chan *Entry, 1024)
+	entryChannel := make(chan *Entry, 1024)
 	entries = append(entries, CreateEntry("", 0, 0, 0))
 
 	for len(directories) > 0 {
