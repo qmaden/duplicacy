@@ -480,10 +480,19 @@ func (chunk *Chunk) Decrypt(encryptionKey []byte, derivationKey string) (err err
 		}
 
 		// Read the parameters
-		chunkSize := int(binary.LittleEndian.Uint64(header[0:8]))
+		// The header comes from the storage: validate it before using it for any size calculation.  The shard
+		// counts in the header, not in the config, describe how this chunk was encoded.
+		encodedSize := binary.LittleEndian.Uint64(header[0:8])
 		dataShards := int(binary.LittleEndian.Uint16(header[8:10]))
 		parityShards := int(binary.LittleEndian.Uint16(header[10:12]))
-		shardSize := (chunkSize + chunk.config.DataShards - 1) / chunk.config.DataShards
+		if dataShards <= 0 || parityShards <= 0 || dataShards+parityShards > 256 {
+			return fmt.Errorf("Invalid erasure coding parameters: %d data shards and %d parity shards", dataShards, parityShards), false
+		}
+		if encodedSize == 0 || encodedSize > uint64(len(encryptedBuffer.Bytes())) {
+			return fmt.Errorf("Invalid erasure coded chunk size %d (%d bytes available)", encodedSize, len(encryptedBuffer.Bytes())), false
+		}
+		chunkSize := int(encodedSize)
+		shardSize := (chunkSize + dataShards - 1) / dataShards
 		// This is the length the chunk file should have
 		expectedLength := bannerLength + 2*len(header) + (dataShards+parityShards)*(shardSize+32)
 		// The minimum length that can be recovered from
@@ -675,6 +684,9 @@ func (chunk *Chunk) Decrypt(encryptionKey []byte, derivationKey string) (err err
 			return err, false
 		}
 
+		if len(decryptedBytes) == 0 {
+			return fmt.Errorf("No data after decryption"), false
+		}
 		paddingLength := int(decryptedBytes[len(decryptedBytes)-1])
 		if paddingLength == 0 {
 			paddingLength = 256
@@ -696,9 +708,19 @@ func (chunk *Chunk) Decrypt(encryptionKey []byte, derivationKey string) (err err
 
 	encryptedBuffer.Read(encryptedBuffer.Bytes()[:offset])
 
+	// A chunk from the storage may claim any decompressed size; never decompress more than the limit
+	limit := chunk.config.maximumDecompressedSize()
+
 	compressed := encryptedBuffer.Bytes()
 	if len(compressed) > 4 && string(compressed[:4]) == "LZ4 " {
 		chunk.buffer.Reset()
+		// The LZ4 data starts with the decompressed length, which the decoder would allocate
+		if len(compressed) < 8 {
+			return fmt.Errorf("LZ4 data truncated (%d bytes)", len(compressed)), false
+		}
+		if length := binary.LittleEndian.Uint32(compressed[4:8]); uint64(length) > uint64(limit) {
+			return fmt.Errorf("LZ4 data claims %d bytes, more than the maximum of %d", length, limit), false
+		}
 		decompressed, err := lz4.Decode(chunk.buffer.Bytes(), encryptedBuffer.Bytes()[4:])
 		if err != nil {
 			return err, false
@@ -717,12 +739,12 @@ func (chunk *Chunk) Decrypt(encryptionKey []byte, derivationKey string) (err err
 		chunk.hash = nil
 
 		encryptedBuffer.Read(encryptedBuffer.Bytes()[:4])
-		inflater, err := zstd.NewReader(encryptedBuffer)
+		inflater, err := zstd.NewReader(encryptedBuffer, zstd.WithDecoderMaxMemory(uint64(limit)))
 		if err != nil {
 			return err, false
 		}
 		defer inflater.Close()
-		if _, err = io.Copy(chunk, inflater); err != nil {
+		if err = copyDecompressed(chunk, inflater, limit); err != nil {
 			return err, false
 		}
 		return nil, rewriteNeeded
@@ -739,10 +761,38 @@ func (chunk *Chunk) Decrypt(encryptionKey []byte, derivationKey string) (err err
 	chunk.hasher = chunk.config.NewKeyedHasher(chunk.config.HashKey)
 	chunk.hash = nil
 
-	if _, err = io.Copy(chunk, inflater); err != nil {
+	if err = copyDecompressed(chunk, inflater, limit); err != nil {
 		return err, false
 	}
 
 	return nil, rewriteNeeded
 
+}
+
+// minimumDecompressionLimit is the smallest limit on the size of a decompressed chunk or file.  It also applies
+// to configs created without chunk sizes, such as the one used to read the 'config' file itself.  It is a
+// variable so that tests can lower it.
+var minimumDecompressionLimit = 256 << 20
+
+// maximumDecompressedSize returns the largest decompressed size accepted from the storage.  Chunks are never
+// larger than the maximum chunk size, and metadata chunks and snapshot files are much smaller, so twice the
+// maximum chunk size leaves a wide margin.
+func (config *Config) maximumDecompressedSize() int {
+	limit := 2 * config.MaximumChunkSize
+	if limit < minimumDecompressionLimit {
+		limit = minimumDecompressionLimit
+	}
+	return limit
+}
+
+// copyDecompressed copies at most 'limit' bytes from a decompressor into the chunk, failing if there is more.
+func copyDecompressed(chunk *Chunk, inflater io.Reader, limit int) error {
+	written, err := io.CopyN(chunk, inflater, int64(limit)+1)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	if written > int64(limit) {
+		return fmt.Errorf("Decompressed data exceeds the maximum of %d bytes", limit)
+	}
+	return nil
 }
