@@ -26,10 +26,10 @@ import (
 	"github.com/klauspost/reedsolomon"
 	"github.com/klauspost/compress/zstd"
 
-	// This is a fork of github.com/minio/highwayhash at 1.0.1 that computes incorrect hash on
-	// arm64 machines.  We need this fork to be able to read the chunks created by Duplicacy
-	// CLI 3.0.1 which unfortunately relies on incorrect hashes to determine if each shard is valid.
-	wronghighwayhash "github.com/gilbertchen/highwayhash"
+	// A pure Go copy of the incorrect hash that github.com/minio/highwayhash 1.0.1 computes on
+	// arm64 machines.  We need it to be able to read the chunks created by Duplicacy CLI 3.0.1
+	// which unfortunately relies on incorrect hashes to determine if each shard is valid.
+	"github.com/gilbertchen/duplicacy/internal/wronghighwayhash"
 
 )
 
@@ -529,7 +529,9 @@ func (chunk *Chunk) Decrypt(encryptionKey []byte, derivationKey string) (err err
 
 			matched := bytes.Compare(hasher.Sum(nil), encryptedBuffer.Bytes()[hashOffset + i * 32: hashOffset + (i + 1) * 32]) == 0
 
-			if !matched && runtime.GOARCH == "arm64" {
+			// The incorrect hash can now be computed on any architecture, so chunks written by CLI 3.0.1
+			// on arm64 are also readable elsewhere
+			if !matched {
 				hasher, err := wronghighwayhash.New(hashKey)
 				if err == nil {
 					_, err = hasher.Write(encryptedBuffer.Bytes()[start: start + shardSize])
