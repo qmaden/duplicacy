@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.10"
+  GOTOOLCHAIN: local
+
+jobs:
+  # Supported platforms are Linux x86-64 and macOS; Windows code is kept but not built or tested.
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build
+        run: go build ./...
+      - name: Unit, golden-fixture and backup/prune tests (race detector)
+        run: go test -race -count=1 -timeout 30m ./...
+
+  storage-options:
+    name: Storage options (${{ matrix.flag }})
+    strategy:
+      fail-fast: false
+      matrix:
+        flag: [-erasure-coding, -separate-metadata, -rsa, -fixed-chunk-size]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Backup, restore and prune with ${{ matrix.flag }}
+        working-directory: src
+        run: go test -count=1 -timeout 20m -run 'TestBackupManager|TestPersistRestore|TestStorage|TestPrune' . -args ${{ matrix.flag }}
+
+  go-next:
+    name: Next Go release (1.27)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+      - run: go build ./...
+      - run: go test -count=1 -timeout 30m ./...
+
+  cross-build:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build release targets
+        run: |
+          # Supported platforms: Linux x86-64 and macOS
+          for target in linux/amd64 darwin/arm64 darwin/amd64; do
+            echo "== $target"
+            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./duplicacy
+          done
+
+  lint:
+    name: Lint and vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l src duplicacy internal)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck (correctness checks)
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 -checks 'SA1*,SA2*,SA3*,SA4017,SA5*,SA6*,SA9*,-SA1019' ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
