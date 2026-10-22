@@ -10,7 +10,6 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
-	"path"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -267,54 +266,6 @@ func (storage *StorageBase) findChunkUnderDirectory(threadIndex int, chunkID str
 	return "", false, 0, fmt.Errorf("Invalid chunk nesting setup")
 }
 
-func checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
-
-	if preferencePath == "" {
-		return fmt.Errorf("Can't verify SSH host since the preference path is not set")
-	}
-	hostFile := path.Join(preferencePath, "known_hosts")
-	file, err := os.OpenFile(hostFile, os.O_RDWR|os.O_CREATE, 0600)
-	if err != nil {
-		return err
-	}
-
-	defer file.Close()
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		return err
-	}
-
-	lineRegex := regexp.MustCompile(`^([^\s]+)\s+(.+)`)
-
-	keyString := string(ssh.MarshalAuthorizedKey(key))
-	keyString = strings.Replace(keyString, "\n", "", -1)
-	remoteAddress := remote.String()
-	if strings.HasSuffix(remoteAddress, ":22") {
-		remoteAddress = remoteAddress[:len(remoteAddress)-len(":22")]
-	}
-
-	for i, line := range strings.Split(string(content), "\n") {
-		matched := lineRegex.FindStringSubmatch(line)
-		if matched == nil {
-			continue
-		}
-
-		if matched[1] == remote.String() {
-			if keyString != matched[2] {
-				LOG_WARN("HOSTKEY_OLD", "The existing key for '%s' is %s (file %s, line %d)",
-					remote.String(), matched[2], hostFile, i)
-				LOG_WARN("HOSTKEY_NEW", "The new key is '%s'", keyString)
-				return fmt.Errorf("The host key for '%s' has changed", remote.String())
-			} else {
-				return nil
-			}
-		}
-	}
-
-	file.Write([]byte(remote.String() + " " + keyString + "\n"))
-	return nil
-}
-
 // CreateStorage creates a storage object based on the provide storage URL.
 func CreateStorage(preference Preference, resetPassword bool, threads int) (storage Storage) {
 
@@ -542,11 +493,14 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 			}
 		}
 
-		hostKeyChecker := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return checkHostKey(hostname, remote, key)
+		hostKeyChecker, hostKeyAlgorithms, err := newSFTPHostKeyChecker(net.JoinHostPort(server, strconv.Itoa(port)))
+		if err != nil {
+			LOG_ERROR("STORAGE_CREATE", "Failed to set up host key verification for %s: %v", storageURL, err)
+			return nil
 		}
 
-		sftpStorage, err := CreateSFTPStorage(matched[1] == "sftpc", server, port, username, storageDir, 2, authMethods, hostKeyChecker, threads)
+		sftpStorage, err := CreateSFTPStorage(matched[1] == "sftpc", server, port, username, storageDir, 2, authMethods,
+			hostKeyChecker, hostKeyAlgorithms, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the SFTP storage at %s: %v", storageURL, err)
 			return nil

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,21 +44,26 @@ func CreateSFTPStorageWithPassword(server string, port int, username string, sto
 		return nil
 	}
 
-	return CreateSFTPStorage(false, server, port, username, storageDir, minimumNesting, authMethods, hostKeyCallback, threads)
+	return CreateSFTPStorage(false, server, port, username, storageDir, minimumNesting, authMethods, hostKeyCallback, nil, threads)
 }
 
 func CreateSFTPStorage(compatibilityMode bool, server string, port int, username string, storageDir string, minimumNesting int,
 	authMethods []ssh.AuthMethod,
 	hostKeyCallback func(hostname string, remote net.Addr,
-		key ssh.PublicKey) error, threads int) (storage *SFTPStorage, err error) {
+		key ssh.PublicKey) error, hostKeyAlgorithms []string, threads int) (storage *SFTPStorage, err error) {
 
 	sftpConfig := &ssh.ClientConfig{
-		User:            username,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
+		User:              username,
+		Auth:              authMethods,
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: hostKeyAlgorithms,
+		// Without a timeout an unresponsive server would hang the backup forever
+		Timeout: 30 * time.Second,
 	}
 
 	if compatibilityMode {
+		LOG_WARN("SSH_LEGACY", "sftpc:// allows legacy SSH algorithms (arcfour, 3des-cbc, diffie-hellman-group1-sha1) "+
+			"that are no longer considered secure; use sftp:// unless the server requires them")
 		sftpConfig.Ciphers = []string{
 			"aes128-ctr", "aes192-ctr", "aes256-ctr",
 			"aes128-gcm@openssh.com",
@@ -74,7 +80,7 @@ func CreateSFTPStorage(compatibilityMode bool, server string, port int, username
 		}
 	}
 
-	serverAddress := fmt.Sprintf("%s:%d", server, port)
+	serverAddress := net.JoinHostPort(server, strconv.Itoa(port))
 	connection, err := ssh.Dial("tcp", serverAddress, sftpConfig)
 	if err != nil {
 		return nil, err
