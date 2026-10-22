@@ -1242,6 +1242,7 @@ func pruneSnapshots(context *cli.Context) {
 	duplicacy.SavePassword(*preference, "password", password)
 
 	backupManager.SetupSnapshotCache(preference.Name)
+	backupManager.SnapshotManager.IgnorePruneLock = context.Bool("ignore-lock")
 	backupManager.SnapshotManager.PruneSnapshots(selfID, snapshotID, revisions, tags, retentions,
 		exhaustive, exclusive, ignoredIDs, dryRun, deleteOnly, collectOnly, threads)
 
@@ -1931,6 +1932,10 @@ func main() {
 				cli.BoolFlag{
 					Name:  "exhaustive",
 					Usage: "remove all unreferenced chunks (not just those referenced by deleted snapshots)",
+				},
+				cli.BoolFlag{
+					Name:  "ignore-lock",
+					Usage: "run even if prune.lock shows that another prune may be in progress",
 				},
 				cli.BoolFlag{
 					Name:  "exclusive",

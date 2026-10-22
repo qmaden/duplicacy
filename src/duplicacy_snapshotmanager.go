@@ -28,6 +28,10 @@ import (
 
 const (
 	secondsInDay = 86400
+
+	// Snapshots must end at least this many seconds after a fossil collection before they count as having started
+	// after it (see FossilCollection.IsDeletable)
+	minimumClockMargin = 15 * 60
 )
 
 // FossilCollection contains fossils and temporary files found during a snapshot deletions.
@@ -112,7 +116,9 @@ func (collection *FossilCollection) IsDeletable(isStrongConsistent bool, ignored
 
 			newSnapshots = append(newSnapshots, snapshot)
 
-			extraTime := 0
+			// The snapshot's end time comes from the backup client's clock and the collection's from the prune
+			// client's; the margin absorbs some clock skew even on strongly consistent storages
+			extraTime := minimumClockMargin
 			if !isStrongConsistent {
 				extraTime = secondsInDay / 2
 			}
@@ -195,6 +201,9 @@ type SnapshotManager struct {
 	// 'check -chunks' skips chunks verified before; with a positive value, chunks verified more than this many
 	// days ago are verified again so that later corruption is detected
 	ReverifyAfterDays int
+
+	// Run prune even if prune.lock shows another prune in progress
+	IgnorePruneLock bool
 }
 
 // CreateSnapshotManager creates a snapshot manager
@@ -1896,6 +1905,15 @@ func (manager *SnapshotManager) PruneSnapshots(selfID string, snapshotID string,
 		LOG_WARN("DELETE_OPTIONS", "Tags or retention policy will be ignored if at least one revision is specified")
 	}
 
+	if !dryRun {
+		releaseLock, err := acquirePruneLock(manager.storage, selfID, manager.IgnorePruneLock)
+		if err != nil {
+			LOG_ERROR("PRUNE_LOCK", "%v", err)
+			return false
+		}
+		defer releaseLock()
+	}
+
 	manager.CreateChunkOperator(false, false, threads, false)
 	defer func() {
 		manager.chunkOperator.Stop()
@@ -2024,6 +2042,16 @@ func (manager *SnapshotManager) PruneSnapshots(selfID string, snapshotID string,
 
 		if len(snapshots) > 0 {
 			allSnapshots[id] = snapshots
+		}
+	}
+
+	// Fossil deletion compares the end times of snapshots, set by the clocks of the backup clients, with the time
+	// of the collection, set by this clock; a client whose clock runs ahead can make fossils deletable too early
+	for id, snapshots := range allSnapshots {
+		latest := snapshots[len(snapshots)-1]
+		if latest.EndTime > time.Now().Unix()+minimumClockMargin {
+			LOG_WARN("PRUNE_CLOCK", "Snapshot %s at revision %d ended %s in the future; check the clock of the computer "+
+				"that created it", id, latest.Revision, PrettyTime(latest.EndTime-time.Now().Unix()))
 		}
 	}
 
