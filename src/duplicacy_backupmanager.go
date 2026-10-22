@@ -218,6 +218,15 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			return chunkCache[fileChunkDir+chunkID]
 		}) {
 			LOG_WARN("INCOMPLETE_DISCARD", "The incomplete snapshot can't be used as it contains chunks not in the storage")
+			incompleteSnapshot.CloseOnDiskFile()
+			incompleteSnapshot = nil
+		}
+	} else if incompleteSnapshot != nil {
+		// The chunks uploaded by the interrupted backup belong to no snapshot, so prune may have removed them since;
+		// reusing them without checking would produce a snapshot that references missing chunks
+		if !manager.incompleteChunksExist(incompleteSnapshot, chunkCache, fileChunkDir, threads) {
+			LOG_WARN("INCOMPLETE_DISCARD", "The incomplete snapshot can't be used as it contains chunks not in the storage")
+			incompleteSnapshot.CloseOnDiskFile()
 			incompleteSnapshot = nil
 		}
 	}
@@ -633,6 +642,57 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 	chunkOperator.Stop()
 
 	return true
+}
+
+// incompleteChunksExist checks that the chunks referenced by an incomplete snapshot still exist.  Chunks
+// referenced by the latest snapshot ('chunkCache') are known to exist; the others are looked up in parallel.
+func (manager *BackupManager) incompleteChunksExist(incompleteSnapshot *EntryList, chunkCache map[string]bool,
+	fileChunkDir string, threads int) bool {
+
+	var unknown []string
+	seen := make(map[string]bool)
+	for _, hashes := range [][]string{incompleteSnapshot.UploadedChunkHashes, incompleteSnapshot.PreservedChunkHashes} {
+		for _, hash := range hashes {
+			chunkID := manager.config.GetChunkIDFromHash(hash)
+			if !chunkCache[fileChunkDir+chunkID] && !seen[chunkID] {
+				seen[chunkID] = true
+				unknown = append(unknown, chunkID)
+			}
+		}
+	}
+	if len(unknown) == 0 {
+		return true
+	}
+	LOG_INFO("INCOMPLETE_CHECK", "Checking %d chunks uploaded by the interrupted backup", len(unknown))
+
+	if threads < 1 {
+		threads = 1
+	}
+	var missing int32
+	var wg sync.WaitGroup
+	chunkIDs := make(chan string)
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func(threadIndex int) {
+			defer wg.Done()
+			for chunkID := range chunkIDs {
+				if atomic.LoadInt32(&missing) > 0 {
+					continue
+				}
+				_, exist, _, err := manager.storage.FindChunk(threadIndex, chunkID, false, false)
+				if err != nil || !exist {
+					LOG_DEBUG("INCOMPLETE_CHECK", "Chunk %s from the incomplete snapshot is missing: %v", chunkID, err)
+					atomic.AddInt32(&missing, 1)
+				}
+			}
+		}(i)
+	}
+	for _, chunkID := range unknown {
+		chunkIDs <- chunkID
+	}
+	close(chunkIDs)
+	wg.Wait()
+	return missing == 0
 }
 
 // Restore downloads the specified snapshot, compares it with what's on the repository, and then downloads

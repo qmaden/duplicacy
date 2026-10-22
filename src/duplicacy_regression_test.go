@@ -318,3 +318,81 @@ func TestSnapshotCacheIsPrivate(t *testing.T) {
 		t.Errorf("A local storage file has mode %v instead of 0644", info.Mode().Perm())
 	}
 }
+
+// B4: resuming an interrupted backup reused the chunks it had uploaded without checking that they still exist.
+// They belong to no snapshot, so prune may have removed them in the meantime.
+func TestResumeChecksIncompleteChunks(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	testDir := t.TempDir()
+	repository := filepath.Join(testDir, "repository")
+	os.MkdirAll(filepath.Join(repository, DUPLICACY_DIRECTORY), 0700)
+	for i := 0; i < 5; i++ {
+		os.WriteFile(filepath.Join(repository, "file"+string(rune('a'+i))), fixtureBytes(20000, uint32(10+i)), 0600)
+	}
+	storageDir := filepath.Join(testDir, "storage")
+	storage, err := CreateFileStorage(storageDir, false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ConfigStorage(storage, CONFIG_LEGACY_ITERATIONS, DEFAULT_COMPRESSION_LEVEL, 4096, 16384, 1024, "", nil, false, "", 0, 0) {
+		t.Fatal("Failed to initialize the storage")
+	}
+
+	newManager := func(top string) *BackupManager {
+		SetDuplicacyPreferencePath(filepath.Join(top, DUPLICACY_DIRECTORY))
+		storage, err := CreateFileStorage(storageDir, false, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manager := CreateBackupManager("test", storage, top, "", "", "", false)
+		manager.SetupSnapshotCache("default")
+		return manager
+	}
+
+	// Interrupt the first backup; the process would save the incomplete snapshot on its way out
+	os.Setenv("DUPLICACY_FAIL_CHUNK", "10")
+	func() {
+		// The interruption is expected; don't let its LOG_ERROR fail the test
+		testingT = nil
+		defer func() {
+			setTestingT(t)
+			if r := recover(); r != nil {
+				RunAtError()
+			}
+		}()
+		newManager(repository).Backup(repository, false, 1, "", false, false, 0, false, 1024, 1024)
+		t.Fatal("The backup was not interrupted")
+	}()
+	os.Unsetenv("DUPLICACY_FAIL_CHUNK")
+	RunAtError = func() {}
+	if _, err := os.Stat(filepath.Join(repository, DUPLICACY_DIRECTORY, "cache", "default", "incomplete_snapshot")); err != nil {
+		t.Fatalf("No incomplete snapshot was saved: %v", err)
+	}
+
+	// Remove every chunk, as a prune would remove unreferenced chunks
+	os.RemoveAll(filepath.Join(storageDir, "chunks"))
+	os.MkdirAll(filepath.Join(storageDir, "chunks"), 0700)
+
+	if !newManager(repository).Backup(repository, false, 1, "", false, false, 0, false, 1024, 1024) {
+		t.Fatal("The resumed backup failed")
+	}
+
+	top := filepath.Join(testDir, "restore")
+	os.MkdirAll(filepath.Join(top, DUPLICACY_DIRECTORY), 0700)
+	checker := newManager(top)
+	if !checker.SnapshotManager.CheckSnapshots("test", []int{1}, "", false, false, false, false, false, false, false, 1, false) {
+		t.Fatal("The resumed backup references missing chunks")
+	}
+	if failed := checker.Restore(top, 1, true, false, 1, true, false, false, false, nil, false); failed != 0 {
+		t.Fatalf("%d files failed to restore", failed)
+	}
+	for i := 0; i < 5; i++ {
+		restored, _ := os.ReadFile(filepath.Join(top, "file"+string(rune('a'+i))))
+		if !bytes.Equal(restored, fixtureBytes(20000, uint32(10+i))) {
+			t.Errorf("file%c was not restored correctly", 'a'+i)
+		}
+	}
+}
