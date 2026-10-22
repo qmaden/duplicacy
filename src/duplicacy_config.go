@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 
 	blake2 "github.com/minio/blake2b-simd"
+	"golang.org/x/crypto/ssh"
 )
 
 // If encryption is turned off, use this key for HMAC-SHA256 or chunk ID generation etc.
@@ -172,8 +173,9 @@ func (config *Config) UnmarshalJSON(description []byte) (err error) {
 		if err != nil {
 			return fmt.Errorf("Invalid RSA public key in the config: %v", err)
 		}
-		config.rsaPublicKey = parsedKey.(*rsa.PublicKey)
-		if config.rsaPublicKey == nil {
+		var ok bool
+		config.rsaPublicKey, ok = parsedKey.(*rsa.PublicKey)
+		if !ok || config.rsaPublicKey == nil {
 			return fmt.Errorf("Unsupported public key type %s in the config", reflect.TypeOf(parsedKey))
 		}
 	}
@@ -651,23 +653,23 @@ func (config *Config) loadRSAPublicKey(keyFile string) {
 
 	decodedKey, _ := pem.Decode(encodedKey)
 	if decodedKey == nil {
-		LOG_ERROR("RSA_PUBLIC", "unrecognized public key in %s", keyFile)
+		LOG_ERROR("RSA_PUBLIC", "unrecognized public key in %s", describeKeySource(keyFile))
 		return
 	}
 	if decodedKey.Type != "PUBLIC KEY" {
-		LOG_ERROR("RSA_PUBLIC", "Unsupported public key type %s in %s", decodedKey.Type, keyFile)
+		LOG_ERROR("RSA_PUBLIC", "Unsupported public key type %s in %s", decodedKey.Type, describeKeySource(keyFile))
 		return
 	}
 
 	parsedKey, err := x509.ParsePKIXPublicKey(decodedKey.Bytes)
 	if err != nil {
-		LOG_ERROR("RSA_PUBLIC", "Failed to parse the public key in %s: %v", keyFile, err)
+		LOG_ERROR("RSA_PUBLIC", "Failed to parse the public key in %s: %v", describeKeySource(keyFile), err)
 		return
 	}
 
 	key, ok := parsedKey.(*rsa.PublicKey)
 	if !ok {
-		LOG_ERROR("RSA_PUBLIC", "Unsupported public key type %s in %s", reflect.TypeOf(parsedKey), keyFile)
+		LOG_ERROR("RSA_PUBLIC", "Unsupported public key type %s in %s", reflect.TypeOf(parsedKey), describeKeySource(keyFile))
 		return
 	}
 
@@ -694,34 +696,15 @@ func (config *Config) loadRSAPrivateKey(keyFile string, passphrase string) {
 		}
 	}
 
-	decodedKey, _ := pem.Decode(encodedKey)
-	if decodedKey == nil {
-		LOG_ERROR("RSA_PRIVATE", "unrecognized private key in %s", keyFile)
+	parsedKey, err := parseRSAPrivateKey(encodedKey, passphrase)
+	if err != nil {
+		LOG_ERROR("RSA_PRIVATE", "Failed to load the private key in %s: %v", describeKeySource(keyFile), err)
 		return
-	}
-	if decodedKey.Type != "RSA PRIVATE KEY" {
-		LOG_ERROR("RSA_PRIVATE", "Unsupported private key type %s in %s", decodedKey.Type, keyFile)
-		return
-	}
-
-	var decodedKeyBytes []byte
-	if passphrase != "" {
-		decodedKeyBytes, err = x509.DecryptPEMBlock(decodedKey, []byte(passphrase))
-	} else {
-		decodedKeyBytes = decodedKey.Bytes
-	}
-
-	var parsedKey interface{}
-	if parsedKey, err = x509.ParsePKCS1PrivateKey(decodedKeyBytes); err != nil {
-		if parsedKey, err = x509.ParsePKCS8PrivateKey(decodedKeyBytes); err != nil {
-			LOG_ERROR("RSA_PRIVATE", "Failed to parse the private key in %s: %v", keyFile, err)
-			return
-		}
 	}
 
 	key, ok := parsedKey.(*rsa.PrivateKey)
 	if !ok {
-		LOG_ERROR("RSA_PRIVATE", "Unsupported private key type %s in %s", reflect.TypeOf(parsedKey), keyFile)
+		LOG_ERROR("RSA_PRIVATE", "Unsupported private key type %s in %s", reflect.TypeOf(parsedKey), describeKeySource(keyFile))
 		return
 	}
 
@@ -751,4 +734,67 @@ func (config *Config) loadRSAPrivateKey(keyFile string, passphrase string) {
 	}
 
 	config.rsaPrivateKey = key
+}
+
+// parseRSAPrivateKey decodes a PEM-encoded private key.  Supported forms are the OpenSSH format (what ssh-keygen
+// writes; with a passphrase it uses bcrypt-pbkdf and AES), PKCS#1 ('RSA PRIVATE KEY') and unencrypted PKCS#8
+// ('PRIVATE KEY'), plus the legacy PEM encryption of PKCS#1 keys for compatibility.
+func parseRSAPrivateKey(encodedKey []byte, passphrase string) (interface{}, error) {
+	block, _ := pem.Decode(encodedKey)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM-encoded private key found")
+	}
+
+	switch block.Type {
+	case "OPENSSH PRIVATE KEY":
+		if passphrase == "" {
+			key, err := ssh.ParseRawPrivateKey(encodedKey)
+			if _, missing := err.(*ssh.PassphraseMissingError); missing {
+				return nil, fmt.Errorf("the key is encrypted and requires a passphrase")
+			}
+			return key, err
+		}
+		key, err := ssh.ParseRawPrivateKeyWithPassphrase(encodedKey, []byte(passphrase))
+		if err == x509.IncorrectPasswordError {
+			return nil, fmt.Errorf("incorrect passphrase")
+		}
+		return key, err
+
+	case "RSA PRIVATE KEY", "PRIVATE KEY":
+		keyBytes := block.Bytes
+		//lint:ignore SA1019 legacy PEM encryption must stay readable for existing keys
+		if x509.IsEncryptedPEMBlock(block) {
+			if passphrase == "" {
+				return nil, fmt.Errorf("the key is encrypted and requires a passphrase")
+			}
+			LOG_WARN("RSA_PRIVATE", "The private key uses the legacy PEM encryption, which is weak; consider converting "+
+				"it to the OpenSSH format with 'ssh-keygen -p -f <key file>'")
+			var err error
+			//lint:ignore SA1019 legacy PEM encryption must stay readable for existing keys
+			keyBytes, err = x509.DecryptPEMBlock(block, []byte(passphrase))
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt the key: %v", err)
+			}
+		}
+		key, err := x509.ParsePKCS1PrivateKey(keyBytes)
+		if err == nil {
+			return key, nil
+		}
+		return x509.ParsePKCS8PrivateKey(keyBytes)
+
+	case "ENCRYPTED PRIVATE KEY":
+		return nil, fmt.Errorf("encrypted PKCS#8 keys are not supported; convert the key to the OpenSSH format " +
+			"with 'ssh-keygen -p -f <key file>'")
+
+	default:
+		return nil, fmt.Errorf("unsupported key type %s", block.Type)
+	}
+}
+
+// describeKeySource names where a key came from for messages; a key passed inline must not end up in the logs.
+func describeKeySource(keyFile string) string {
+	if strings.Contains(keyFile, "-----BEGIN") {
+		return "the key provided inline"
+	}
+	return keyFile
 }
