@@ -17,6 +17,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"hash"
+	"io"
 	"io/ioutil"
 	"os"
 	"reflect"
@@ -396,10 +397,10 @@ func (config *Config) ComputeFileHash(path string, buffer []byte) string {
 	hasher := config.NewFileHasher()
 	defer file.Close()
 
-	count := 1
-	for count > 0 {
-		count, err = file.Read(buffer)
-		hasher.Write(buffer[:count])
+	// A read error must not produce the hash of a partial file
+	if _, err = io.CopyBuffer(hasher, file, buffer); err != nil {
+		LOG_WARN("FILE_HASH", "Failed to read %s: %v", path, err)
+		return ""
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil))

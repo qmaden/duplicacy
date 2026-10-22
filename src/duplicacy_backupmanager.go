@@ -644,6 +644,13 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 	return true
 }
 
+// isPathInside returns true if 'child' is 'parent' or inside it.  A plain string prefix test would also match
+// siblings such as '/data/ab' for '/data/a'.
+func isPathInside(child string, parent string) bool {
+	relative, err := filepath.Rel(parent, child)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
 // incompleteChunksExist checks that the chunks referenced by an incomplete snapshot still exist.  Chunks
 // referenced by the latest snapshot ('chunkCache') are known to exist; the others are looked up in parallel.
 func (manager *BackupManager) incompleteChunksExist(incompleteSnapshot *EntryList, chunkCache map[string]bool,
@@ -708,7 +715,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	LOG_DEBUG("RESTORE_PARAMETERS", "top: %s, revision: %d, in-place: %t, quick: %t, delete: %t",
 		top, revision, inPlace, quickMode, deleteMode)
 
-	if !strings.HasPrefix(GetDuplicacyPreferencePath(), top) {
+	if !isPathInside(GetDuplicacyPreferencePath(), top) {
 		LOG_INFO("RESTORE_INPLACE", "Forcing in-place mode with a non-default preference path")
 		inPlace = true
 	}
@@ -1679,10 +1686,14 @@ func (manager *BackupManager) RestoreFile(chunkDownloader *ChunkDownloader, chun
 		newFile.Close()
 		newFile = nil
 
-		err = os.Remove(fullPath)
-		if err != nil && !os.IsNotExist(err) {
-			LOG_ERROR("DOWNLOAD_REMOVE", "Failed to remove the old file: %v", err)
-			return false, nil
+		// On POSIX systems rename replaces the old file atomically; removing it first would lose it if the restore
+		// were interrupted in between.  Windows can't rename over an existing file.
+		if runtime.GOOS == "windows" {
+			err = os.Remove(fullPath)
+			if err != nil && !os.IsNotExist(err) {
+				LOG_ERROR("DOWNLOAD_REMOVE", "Failed to remove the old file: %v", err)
+				return false, nil
+			}
 		}
 
 		err = os.Rename(temporaryPath, fullPath)

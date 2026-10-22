@@ -103,11 +103,13 @@ func TestCheckSnapshotReportsErrors(t *testing.T) {
 	broken := makeVersion0Snapshot([]*Entry{
 		{Path: "a", Size: 50, Mode: 0644, StartChunk: 1, StartOffset: 0, EndChunk: 0, EndOffset: 50},
 	})
-	err := snapshotManager.CheckSnapshot(broken)
-	if err == nil {
+	// The entry is rejected while the file list is decoded (SNAPSHOT_ENTRY) or by CheckSnapshot itself
+	var err error
+	message := expectLogError(func() { err = snapshotManager.CheckSnapshot(broken) })
+	if err == nil && message == "" {
 		t.Fatal("A version 0 snapshot with a file ending before it starts passed the check")
 	}
-	t.Logf("Expected error: %v", err)
+	t.Logf("Expected error: %v %s", err, message)
 }
 
 func TestEntryCheckRejectsInvalidChunkRanges(t *testing.T) {
@@ -453,5 +455,38 @@ func TestCheckReverifiesOldChunks(t *testing.T) {
 	}
 	if message := check(5); !strings.Contains(message, "corrupted") {
 		t.Errorf("Re-verification didn't detect the corrupted chunk: %q", message)
+	}
+}
+
+// B15: the preference directory used to count as inside the restore directory by a plain string prefix test.
+func TestIsPathInside(t *testing.T) {
+	cases := []struct {
+		child, parent string
+		inside        bool
+	}{
+		{"/data/a/.duplicacy", "/data/a", true},
+		{"/data/a", "/data/a", true},
+		{"/data/ab/.duplicacy", "/data/a", false},
+		{"/data", "/data/a", false},
+		{"/data/a/../b", "/data/a", false},
+	}
+	for _, c := range cases {
+		if isPathInside(c.child, c.parent) != c.inside {
+			t.Errorf("isPathInside(%q, %q) should be %v", c.child, c.parent, c.inside)
+		}
+	}
+}
+
+// B13: a read error used to produce the hash of whatever had been read so far.
+func TestComputeFileHashReadError(t *testing.T) {
+	SetLoggingLevel(ERROR)
+	config := CreateConfig()
+	if hash := config.ComputeFileHash(t.TempDir(), make([]byte, 4096)); hash != "" {
+		t.Errorf("Hashing a directory returned %q instead of an empty hash", hash)
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(file, []byte("content"), 0600)
+	if hash := config.ComputeFileHash(file, make([]byte, 4096)); hash == "" {
+		t.Error("Hashing a readable file failed")
 	}
 }

@@ -149,6 +149,13 @@ func (snapshot *Snapshot) ListRemoteFiles(config *Config, chunkOperator *ChunkOp
 					snapshot.ID, snapshot.Revision, err)
 				return
 			}
+			// Version 1 entries are checked while decoding below; version 0 entries need the same check, or a
+			// corrupted file list would make restore, backup and check index past the chunk list
+			if err = entry.check(snapshot.ChunkLengths); err != nil {
+				LOG_ERROR("SNAPSHOT_ENTRY", "Failed to load the snapshot %s at revision %d: %v",
+					snapshot.ID, snapshot.Revision, err)
+				return
+			}
 			files = append(files, &entry)
 		}
 
