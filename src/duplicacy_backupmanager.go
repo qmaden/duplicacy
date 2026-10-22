@@ -786,11 +786,20 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	// Entry paths come from the storage; this makes sure nothing is written outside 'top'
 	guard := newRestorePathGuard(top)
 
+	// Directories excluded by the patterns, whose attributes are still applied if anything inside them is restored
+	filteredDirectories := make(map[string]*Entry)
+	// Entries that were restored or checked, whose filtered ancestors need their attributes
+	var restoredPaths []string
+
 	for remoteEntry := range remoteListingChannel {
 
 		if len(patterns) > 0 && !MatchPath(remoteEntry.Path, patterns) {
+			if remoteEntry.IsDir() {
+				filteredDirectories[remoteEntry.Path] = remoteEntry
+			}
 			continue
 		}
+		restoredPaths = append(restoredPaths, remoteEntry.Path)
 
 		// remoteEntry is valid; now find the matching localEntry
 		var compareResult int
@@ -873,8 +882,20 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 				}
 				_, err = os.Lstat(fullPath)
 			} else if err == nil && !stat.IsDir() {
-				LOG_ERROR("RESTORE_NOTDIR", "The path %s is not a directory", fullPath)
-				return 0
+				// The path was a file and is a directory in the snapshot (upstream #429)
+				if !overwrite {
+					LOG_WARN("RESTORE_NOTDIR", "Skipped %s: the path is not a directory; specify -overwrite to replace it",
+						remoteEntry.Path)
+					failedFileCount++
+					continue
+				}
+				LOG_INFO("RESTORE_NOTDIR", "Replacing the file %s with a directory", remoteEntry.Path)
+				if err = os.Remove(fullPath); err != nil {
+					LOG_ERROR("RESTORE_NOTDIR", "Failed to remove %s: %v", fullPath, err)
+					return 0
+				}
+				guard.invalidate(remoteEntry.Path)
+				_, err = os.Lstat(fullPath)
 			}
 
 			if os.IsNotExist(err) {
@@ -948,6 +969,29 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 		}
 
 		stat, _ := os.Lstat(fullPath)
+		if stat != nil && stat.IsDir() {
+			// The path was a directory and is a file in the snapshot (upstream #429).  A directory is only removed
+			// with -overwrite, and only if it is empty unless -delete would remove its contents anyway.
+			if !overwrite {
+				LOG_WARN("RESTORE_NOTFILE", "Skipped %s: the path is a directory; specify -overwrite to replace it", file.Path)
+				failedFileCount++
+				continue
+			}
+			if deleteMode && len(patterns) == 0 {
+				err = os.RemoveAll(fullPath)
+			} else {
+				err = os.Remove(fullPath)
+			}
+			guard.invalidate(file.Path)
+			if err != nil {
+				LOG_WARN("RESTORE_NOTFILE", "Skipped %s: failed to remove the directory in its place (specify -delete to remove "+
+					"a directory that isn't empty): %v", file.Path, err)
+				failedFileCount++
+				continue
+			}
+			LOG_INFO("RESTORE_NOTFILE", "Replaced the directory %s with a file", file.Path)
+			stat = nil
+		}
 		if stat != nil && stat.Mode()&os.ModeSymlink != 0 {
 			// A symbolic link is never the same as the file; RestoreFile replaces it (with -overwrite) without
 			// following it
@@ -1030,9 +1074,19 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	}
 
 	if deleteMode && len(patterns) == 0 {
+		// A path that changed between a file and a directory is both an extra local entry and an entry of the
+		// snapshot; it has just been restored and must not be deleted
+		inSnapshot := make(map[string]bool)
+		for _, restoredPath := range restoredPaths {
+			inSnapshot[strings.TrimSuffix(restoredPath, "/")] = true
+		}
+
 		// Reverse the order to make sure directories are empty before being deleted
 		for i := range extraFiles {
 			file := extraFiles[len(extraFiles)-1-i]
+			if inSnapshot[strings.TrimSuffix(file, "/")] {
+				continue
+			}
 			fullPath := joinPath(top, file)
 			os.Remove(fullPath)
 			LOG_INFO("RESTORE_DELETE", "Deleted %s", file)
@@ -1046,6 +1100,27 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			continue
 		}
 		entry.RestoreMetadata(dir, nil, setOwner)
+	}
+
+	// With patterns, the directories leading to restored entries were created with default attributes; give them
+	// the attributes from the snapshot (upstream #84)
+	appliedDirectories := make(map[string]bool)
+	for _, restoredPath := range restoredPaths {
+		for parent := (&Entry{Path: restoredPath}).GetParent(); parent != ""; parent = (&Entry{Path: parent}).GetParent() {
+			directoryPath := parent + "/"
+			entry, found := filteredDirectories[directoryPath]
+			if !found || appliedDirectories[directoryPath] {
+				continue
+			}
+			appliedDirectories[directoryPath] = true
+			dir, err := guard.path(directoryPath)
+			if err != nil || isSymlink(dir) {
+				continue
+			}
+			if _, err = os.Lstat(dir); err == nil {
+				entry.RestoreMetadata(dir, nil, setOwner)
+			}
+		}
 	}
 
 	if showStatistics {

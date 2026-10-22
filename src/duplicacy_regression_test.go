@@ -652,3 +652,91 @@ func TestRewriteChunkRollsBack(t *testing.T) {
 		}
 	}
 }
+
+// restoreRevisionForTest restores 'revision' of snapshot "test" in place into 'top', allowing failures.
+func restoreRevisionForTest(t *testing.T, storageDir string, top string, revision int, overwrite bool, deleteMode bool,
+	patterns []string) int {
+	os.MkdirAll(filepath.Join(top, DUPLICACY_DIRECTORY), 0700)
+	SetDuplicacyPreferencePath(filepath.Join(top, DUPLICACY_DIRECTORY))
+	storage, err := CreateFileStorage(storageDir, false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := CreateBackupManager("test", storage, top, "", "", "", false)
+	manager.SetupSnapshotCache("default")
+	return manager.Restore(top, revision, true, false, 1, overwrite, deleteMode, false, false, patterns, true)
+}
+
+// N6 (upstream #429): restore failed when a path had changed between a directory and a file.
+func TestRestoreReplacesChangedFileTypes(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	repository := t.TempDir()
+	os.WriteFile(filepath.Join(repository, "keep"), []byte("x"), 0600)
+	os.MkdirAll(filepath.Join(repository, "test"), 0700)
+	os.WriteFile(filepath.Join(repository, "test", "inside"), []byte("in a directory"), 0600)
+	storageDir := backupForRestoreTest(t, repository) // revision 1: 'test' is a directory
+
+	os.RemoveAll(filepath.Join(repository, "test"))
+	os.WriteFile(filepath.Join(repository, "test"), []byte("now a file"), 0600)
+	SetDuplicacyPreferencePath(filepath.Join(repository, DUPLICACY_DIRECTORY))
+	storage, _ := CreateFileStorage(storageDir, false, 1)
+	manager := CreateBackupManager("test", storage, repository, "", "", "", false)
+	manager.SetupSnapshotCache("default")
+	if !manager.Backup(repository, false, 1, "", false, false, 0, false, 1024, 1024) { // revision 2: 'test' is a file
+		t.Fatal("Backup failed")
+	}
+
+	// 'test' is a file where revision 1 has a directory
+	top := t.TempDir()
+	os.WriteFile(filepath.Join(top, "test"), []byte("now a file"), 0600)
+	if failed := restoreRevisionForTest(t, storageDir, top, 1, false, false, nil); failed == 0 {
+		t.Error("Replacing a file with a directory without -overwrite reported no failure")
+	}
+	if failed := restoreRevisionForTest(t, storageDir, top, 1, true, true, nil); failed != 0 {
+		t.Errorf("Restoring revision 1 over a file reported %d failures", failed)
+	}
+	assertFileContent(t, filepath.Join(top, "test", "inside"), "in a directory")
+
+	// 'test' is a non-empty directory where revision 2 has a file
+	if failed := restoreRevisionForTest(t, storageDir, top, 2, true, false, nil); failed == 0 {
+		t.Error("A non-empty directory was replaced without -delete")
+	}
+	assertFileContent(t, filepath.Join(top, "test", "inside"), "in a directory")
+	if failed := restoreRevisionForTest(t, storageDir, top, 2, true, true, nil); failed != 0 {
+		t.Errorf("Restoring revision 2 over a directory reported %d failures", failed)
+	}
+	assertFileContent(t, filepath.Join(top, "test"), "now a file")
+}
+
+// N8 (upstream #84): directories leading to the files restored by a pattern kept default permissions instead of
+// those in the snapshot.
+func TestPartialRestoreSetsParentAttributes(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	repository := t.TempDir()
+	os.MkdirAll(filepath.Join(repository, "a", "b"), 0700)
+	os.WriteFile(filepath.Join(repository, "a", "b", "f"), []byte("file"), 0600)
+	os.WriteFile(filepath.Join(repository, "a", "other"), []byte("not restored"), 0600)
+	os.Chmod(filepath.Join(repository, "a"), 0750)
+	os.Chmod(filepath.Join(repository, "a", "b"), 0710)
+	storageDir := backupForRestoreTest(t, repository)
+
+	top := t.TempDir()
+	if failed := restoreRevisionForTest(t, storageDir, top, 1, true, false, []string{"+a/b/f"}); failed != 0 {
+		t.Fatalf("%d files failed to restore", failed)
+	}
+	assertFileContent(t, filepath.Join(top, "a", "b", "f"), "file")
+	if _, err := os.Stat(filepath.Join(top, "a", "other")); err == nil {
+		t.Error("A file excluded by the pattern was restored")
+	}
+	for dir, mode := range map[string]os.FileMode{"a": 0750, "a/b": 0710} {
+		if info, err := os.Stat(filepath.Join(top, filepath.FromSlash(dir))); err != nil || info.Mode().Perm() != mode {
+			t.Errorf("%s has mode %v instead of %v (error %v)", dir, info.Mode().Perm(), mode, err)
+		}
+	}
+}
