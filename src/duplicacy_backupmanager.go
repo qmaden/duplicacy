@@ -41,6 +41,8 @@ type BackupManager struct {
 	excludeByAttribute bool   // don't backup file based on file attribute
 
 	cachePath string
+
+	SkippedEntries int // files and directories skipped by the last backup because of access errors
 }
 
 func (manager *BackupManager) SetDryRun(dryRun bool) {
@@ -609,6 +611,8 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			skipped += fmt.Sprintf("%d files", len(skippedFiles))
 		}
 	}
+
+	manager.SkippedEntries = len(skippedDirectories) + len(skippedFiles)
 
 	if len(skipped) > 0 {
 		if len(skippedDirectories)+len(skippedFiles) == 1 {

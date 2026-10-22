@@ -29,6 +29,10 @@ import (
 
 const (
 	ArgumentExitCode = 3
+
+	// The backup completed but some files or directories were skipped because of access errors; only used with
+	// 'backup -strict' so that existing scripts keep seeing 0
+	SkippedExitCode = 4
 )
 
 var ScriptEnabled bool
@@ -811,6 +815,12 @@ func backupRepository(context *cli.Context) {
 	backupManager.Backup(repository, quickMode, threads, context.String("t"), showStatistics, enableVSS, vssTimeout, enumOnly, metadataChunkSize, maximumInMemoryEntries)
 
 	runScript(context, preference.Name, "post")
+
+	if context.Bool("strict") && backupManager.SkippedEntries > 0 {
+		duplicacy.LOG_WARN("BACKUP_STRICT", "Exiting with code %d because %d file(s) or directories were skipped",
+			SkippedExitCode, backupManager.SkippedEntries)
+		os.Exit(SkippedExitCode)
+	}
 }
 
 func restoreRepository(context *cli.Context) {
@@ -1536,6 +1546,10 @@ func main() {
 				cli.BoolFlag{
 					Name:  "vss",
 					Usage: "enable the Volume Shadow Copy service (Windows and macOS using APFS only)",
+				},
+				cli.BoolFlag{
+					Name:  "strict",
+					Usage: "exit with code 4 if any file or directory was skipped because of an access error",
 				},
 				cli.IntFlag{
 					Name:     "vss-timeout",

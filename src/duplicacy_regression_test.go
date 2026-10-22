@@ -245,3 +245,40 @@ func TestSeparateMetadataDoesNotHideFileChunks(t *testing.T) {
 		t.Errorf("The file with the same content as a metadata chunk was not restored correctly (error %v)", err)
 	}
 }
+
+// N5 (upstream #540): the number of entries skipped because of access errors is reported, so that the CLI can
+// fail 'backup -strict' instead of exiting with 0.
+func TestBackupCountsSkippedEntries(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read files without read permission")
+	}
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	repository := t.TempDir()
+	os.WriteFile(filepath.Join(repository, "readable"), []byte("ok"), 0600)
+	unreadable := filepath.Join(repository, "unreadable")
+	os.WriteFile(unreadable, []byte("secret"), 0600)
+	os.Chmod(unreadable, 0)
+	defer os.Chmod(unreadable, 0600)
+
+	storageDir := filepath.Join(t.TempDir(), "storage")
+	storage, err := CreateFileStorage(storageDir, false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ConfigStorage(storage, CONFIG_DEFAULT_ITERATIONS, DEFAULT_COMPRESSION_LEVEL, 4096, 16384, 1024, "", nil, false, "", 0, 0) {
+		t.Fatal("Failed to initialize the storage")
+	}
+	os.MkdirAll(filepath.Join(repository, DUPLICACY_DIRECTORY), 0700)
+	SetDuplicacyPreferencePath(filepath.Join(repository, DUPLICACY_DIRECTORY))
+	manager := CreateBackupManager("test", storage, repository, "", "", "", false)
+	manager.SetupSnapshotCache("default")
+	if !manager.Backup(repository, false, 1, "", false, false, 0, false, 1024, 1024) {
+		t.Fatal("Backup failed")
+	}
+	if manager.SkippedEntries != 1 {
+		t.Errorf("%d skipped entries reported instead of 1", manager.SkippedEntries)
+	}
+}
