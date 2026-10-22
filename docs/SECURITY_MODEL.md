@@ -62,10 +62,9 @@ restore produce wrong (but contained) content.
 
 ## Known limitations
 
-- **Prune** relies on the clocks of the backup clients and on fossil collections stored locally on the machine that
-  runs prune. Don't run prune from several machines at the same time; see `REVIEW_PLAN.md` (B6) for planned
-  improvements.
-- **Resuming an interrupted backup** trusts its local state about which chunks were already uploaded (B4).
-- **`check -chunks`** does not re-verify chunks it has verified before (B5).
+- **Prune** relies on the clocks of the backup clients (with a 15-minute margin on strongly consistent storages)
+  and on fossil collections stored locally on the machine that runs prune. `prune.lock` stops a second prune
+  started while one is running, but it is advisory: storages offer no atomic lock. Run prune from one machine.
+- **`check -chunks`** skips chunks it verified before unless `-reverify-days` is given.
 - The old config format (static salt, 16,384 iterations) is still accepted for reading. Run
   `duplicacy password -iterations 600000` to move such storages to the current format.

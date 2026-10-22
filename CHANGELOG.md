@@ -16,6 +16,9 @@ All notable changes to this fork are listed here. The format follows
 - `password -iterations N` can keep the same password to upgrade the key derivation of an existing storage.
 - Fuzz targets for the decoders of untrusted storage data (`FuzzChunkDecrypt`, `FuzzEntryDecode`,
   `FuzzSnapshotDescription`, `FuzzConfigUnmarshal`).
+- `check -chunks -reverify-days N` verifies again chunks last verified more than N days ago.
+- `prune` takes an advisory `prune.lock` on the storage; `-ignore-lock` overrides it.
+- Restore with `-overwrite` replaces paths that changed between a file and a directory (upstream #429).
 
 ### Security
 
@@ -38,6 +41,9 @@ All notable changes to this fork are listed here. The format follows
   pure Go package (`internal/wronghighwayhash`). The code now builds with Go 1.27, and chunks written by CLI 3.0.1
   on arm64 can be read on any architecture.
 - Supported platforms are Linux x86-64 and macOS.
+- `prune -keep` policies are sorted by age; policies given out of order used to be skipped silently.
+- Fossils are deleted only after snapshots ending at least 15 minutes after the collection on strongly consistent
+  storages, to tolerate clock skew.
 
 ### Fixed
 
@@ -51,3 +57,11 @@ All notable changes to this fork are listed here. The format follows
 - Erasure-coded chunks were decoded with the shard counts of the config instead of the chunk header.
 - `password` could leave a storage without a config file when saving the new one failed.
 - Samba storages on IPv6 addresses; FileFabric upload error handling; `%` in pre/post script output.
+- A resumed backup could reference chunks that prune had removed since the interruption.
+- `check -rewrite` could leave a chunk only as a fossil when uploading the repaired copy failed.
+- `restore -delete` deleted a file it had just restored in place of a directory.
+- With patterns, restore left the directories above restored files with default permissions (upstream #84).
+- The chunk operator could report completion before all queued tasks had finished; copy counted chunks with a data
+  race and reported existing chunks as copied; restore progress used a stale total.
+- Version 0 snapshot entries were not checked against the chunk list; file hashes ignored read errors; restore
+  removed the old file before renaming the new one over it; a path prefix test matched sibling directories.

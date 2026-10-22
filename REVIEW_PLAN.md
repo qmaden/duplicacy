@@ -5,7 +5,7 @@ Reviewed: 2026-10-22
 
 ## Implementation status (updated 2026-10-22)
 
-**Phases 0, 1 and 2 are implemented** on branch `go-1.27-wronghighwayhash`, one commit per item. Every fix has a
+**Phases 0, 1, 2 and 3 are implemented** on branch `go-1.27-wronghighwayhash`, one commit per item. Every fix has a
 regression test that fails without it, where one was practical. The full suite passes with the race detector.
 
 | Phase | Item | Commit |
@@ -25,7 +25,16 @@ regression test that fails without it, where one was practical. The full suite p
 | 2 | S3 token files, S9 private cache, S6 masked secrets | `cef7982` |
 | 2 | S4 600k iterations, iteration cap, safe `password` command | `1dd192f` |
 | 2 | S7 RSA keys (OpenSSH, PKCS#8), inline keys not logged | `4774372` |
-| 2 | Fuzz targets; docs FORMAT, SECURITY_MODEL, SECURITY, UPGRADING | (next commits) |
+| 2 | Fuzz targets; `Decrypt` no longer exits on RSA chunks without a key | `5007e82` |
+| 2 | Docs: FORMAT, SECURITY_MODEL, SECURITY, UPGRADING | `27e7849` |
+| 3 | B7 retention policies applied by age | `8749e27` |
+| 3 | B4 verify chunks of an interrupted backup before resuming | `21e9a77` |
+| 3 | B5 `check -chunks -reverify-days N` | `1d1e206` |
+| 3 | B6 15-minute clock margin, future end-time warning, advisory `prune.lock` | `5be414b` |
+| 3 | B8 atomic restore rename, B9 v0 entry checks, B13 hash read errors, B15 path containment | `4cc616f` |
+| 3 | B10 task counting/Stop, B11 copy race and statistics, restore progress; first copy test | `c2e8319` |
+| 3 | B16 rewrite never leaves a chunk only as a fossil | `5f20dd7` |
+| 3 | N6 restore over changed file types (#429), delete-mode fix, N8 partial-restore parents (#84) | `da52611` |
 
 **New findings while implementing:**
 
@@ -39,9 +48,25 @@ regression test that fails without it, where one was practical. The full suite p
   for RSA chunks without a private key. Both fixed.
 - Supported platforms were narrowed to Linux x86-64 and macOS at the owner's request; CI no longer builds Windows.
 
-**Still open** (Phase 3 onward): B4 resume verification, B5 re-verification of chunks, B6 prune clock margin and
-lock, B7 retention policy sorting, N6 restore over a changed file type (upstream #429), N7 read errors aborting
-backups (upstream #309), N8–N12, and the performance work in section 9.
+More findings from Phase 3:
+
+- `restore -delete` removed a file it had just restored in place of a directory (the stale directory was still in
+  the list of extra local entries). Fixed with N6.
+- `check -rewrite` uploaded even when moving the old copy aside had failed, which on SFTP silently did nothing
+  while reporting success. Fixed with B16.
+- `copy` had no test at all; `TestCopySnapshots` now covers it, and caught the B11 race on the old code.
+
+**Deferred, with reasons:**
+
+- B12 and B17 were done in Phase 1 (`162a56e`).
+- B14 (exhaustive prune deleting in-flight `.tmp` uploads): a `.tmp` file exists only while one chunk uploads, and
+  it is deleted only by a later prune whose collection became deletable in between, so the window is a single
+  upload. Storages don't report file times uniformly, so an age threshold would need per-backend work.
+- N7 (a read error in the middle of a file aborts the backup, upstream #309): skipping the file would leave its
+  partial data in the chunk stream and shift the offsets of every following file; it needs support for gaps in the
+  entry list. Errors on the first read are rare on Linux and macOS.
+- N9 (resume for incremental backups), N10 (shared retry with backoff), N11 (closing S3 connections), N12 (B2 v3/v4
+  API) and the performance work in section 9 are the next phases.
 
 ## 0. What was done
 

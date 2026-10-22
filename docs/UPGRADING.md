@@ -25,11 +25,35 @@ and earlier versions can read storages written by this one.
 - Entries whose paths are absolute or contain `..` are skipped and reported as failures.
 - **setuid/setgid bits** are restored only when ownership is restored too (the default). With `-ignore-owner` they
   are dropped.
+- With `-overwrite`, a path that changed between a file and a directory is now replaced (upstream #429). A
+  directory in the way of a file is only removed if it is empty, or with its contents when `-delete` is also
+  given. Without `-overwrite` such entries are reported as failures instead of aborting the restore.
+- With patterns, the directories leading to the restored files now get the permissions, owner and times recorded
+  in the snapshot instead of defaults (upstream #84).
 
 ### Backup
 
 - New option `-strict`: exit with code **4** when any file or directory was skipped because of an access error.
   Without it the exit code is 0 as before.
+- Resuming an interrupted backup first checks that the chunks it uploaded still exist (prune may have removed
+  them) and starts over if any is missing. On storages with slow lookups this adds a check per uploaded chunk.
+
+### Prune
+
+- **`-keep` policies are applied by age, whatever order they are given in.** Previously a policy listed out of
+  order (not from the oldest age down) was silently skipped, so check that the policies you pass express what you
+  want: after upgrading, they all take effect. Two policies for the same age are now an error.
+- Prune writes `prune.lock` to the storage while it runs and refuses to start while another prune's lock is less
+  than 24 hours old. If a prune was killed, delete `prune.lock` or pass `-ignore-lock`. Dry runs don't use the
+  lock.
+- On strongly consistent storages (local disk, SFTP, SMB, B2, GCS, Azure), fossils are deleted only once every
+  snapshot id has a revision ending at least 15 minutes after the fossil collection (it was immediately after),
+  to tolerate clock differences between computers. A warning is printed when a snapshot ended in the future.
+
+### Check
+
+- New option `-reverify-days N` for `check -chunks`: chunks last verified more than N days ago are downloaded and
+  verified again. Without it, previously verified chunks are skipped as before.
 
 ### Encryption and passwords
 

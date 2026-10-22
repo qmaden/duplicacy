@@ -19,6 +19,7 @@ Integers are little-endian.
 | `fossils/`, `metadata-fossils/` | Fossils on storages that can't rename in place (Amazon Cloud Drive, Google Drive, OneDrive) |
 | `…/<name>.<random>.tmp` | A file being uploaded; renamed when complete |
 | `snapshots/<snapshot id>/<revision>` | A snapshot file; see [Snapshot files](#snapshot-files) |
+| `prune.lock` | JSON (`host`, `pid`, `snapshot_id`, `time`, `token`) written by a running prune; advisory, ignored by older versions |
 
 Storages created before nesting existed may use read levels such as `[1, 2]`; the `nesting` file and the
 `fixed-nesting` key in the config select the levels.
@@ -138,7 +139,8 @@ A size of 0 means no chunks. Chunk numbers index the snapshot's chunk sequence.
    the fossils, temporary files and the latest revision of every snapshot id is saved **locally** in the prune
    client's cache (`.duplicacy/cache/<storage>/fossils/<n>`).
 2. A later prune deletes the fossils once every snapshot id has a new revision finished after the collection
-   (or has been inactive for 7 days), after resurrecting any fossil that new revisions reference.
+   (at least 15 minutes after on strongly consistent storages, 12 hours on others) or has been inactive for 7
+   days, after resurrecting any fossil that new revisions reference.
 
 Readers that can't find a chunk look for its fossil before failing.
 
