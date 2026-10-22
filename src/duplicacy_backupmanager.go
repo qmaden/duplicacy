@@ -703,6 +703,9 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	var localEntry *Entry
 	localListingOK := true
 
+	// Entry paths come from the storage; this makes sure nothing is written outside 'top'
+	guard := newRestorePathGuard(top)
+
 	for remoteEntry := range remoteListingChannel {
 
 		if len(patterns) > 0 && !MatchPath(remoteEntry.Path, patterns) {
@@ -740,7 +743,13 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			localEntry = nil
 		}
 
-		fullPath := joinPath(top, remoteEntry.Path)
+		fullPath, err := guard.path(remoteEntry.Path)
+		if err != nil {
+			LOG_WARN("RESTORE_UNSAFE_PATH", "Skipped %s: %v", remoteEntry.Path, err)
+			failedFileCount++
+			continue
+		}
+
 		if remoteEntry.IsLink() {
 			stat, err := os.Lstat(fullPath)
 			if stat != nil {
@@ -756,6 +765,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			}
 
 			err = os.Symlink(remoteEntry.Link, fullPath)
+			guard.invalidate(remoteEntry.Path)
 			if err != nil {
 				LOG_ERROR("RESTORE_SYMLINK", "Can't create symlink %s: %v", remoteEntry.Path, err)
 				return 0
@@ -764,9 +774,25 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			LOG_TRACE("DOWNLOAD_DONE", "Symlink %s updated", remoteEntry.Path)
 		} else if remoteEntry.IsDir() {
 
-			stat, err := os.Stat(fullPath)
+			stat, err := os.Lstat(fullPath)
 
-			if err == nil && !stat.IsDir() {
+			if err == nil && stat.Mode()&os.ModeSymlink != 0 {
+				// Never follow a symbolic link where the snapshot has a directory
+				if !overwrite {
+					LOG_WARN("RESTORE_SYMLINK", "Skipped %s: the path is a symbolic link; specify -overwrite to replace it with a directory",
+						remoteEntry.Path)
+					failedFileCount++
+					continue
+				}
+				LOG_INFO("RESTORE_SYMLINK", "Replacing the symbolic link %s with a directory", remoteEntry.Path)
+				err = os.Remove(fullPath)
+				guard.invalidate(remoteEntry.Path)
+				if err != nil {
+					LOG_ERROR("RESTORE_SYMLINK", "Failed to remove the symbolic link %s: %v", fullPath, err)
+					return 0
+				}
+				_, err = os.Lstat(fullPath)
+			} else if err == nil && !stat.IsDir() {
 				LOG_ERROR("RESTORE_NOTDIR", "The path %s is not a directory", fullPath)
 				return 0
 			}
@@ -833,9 +859,20 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	// Now download files one by one
 	for _, file := range fileEntries {
 
-		fullPath := joinPath(top, file.Path)
-		stat, _ := os.Stat(fullPath)
-		if stat != nil {
+		// Check the path again: symbolic links may have been created since the entry was listed
+		fullPath, err := guard.path(file.Path)
+		if err != nil {
+			LOG_WARN("RESTORE_UNSAFE_PATH", "Skipped %s: %v", file.Path, err)
+			failedFileCount++
+			continue
+		}
+
+		stat, _ := os.Lstat(fullPath)
+		if stat != nil && stat.Mode()&os.ModeSymlink != 0 {
+			// A symbolic link is never the same as the file; RestoreFile replaces it (with -overwrite) without
+			// following it
+			stat = nil
+		} else if stat != nil {
 			if quickMode {
 				if file.IsSameAsFileInfo(stat) {
 					LOG_TRACE("RESTORE_SKIP", "File %s unchanged (by size and timestamp)", file.Path)
@@ -861,6 +898,17 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 
 		// Handle zero size files.
 		if file.Size == 0 {
+			if isSymlink(fullPath) {
+				if !overwrite {
+					LOG_WARN("RESTORE_SYMLINK", "Skipped %s: the path is a symbolic link; specify -overwrite to replace it", file.Path)
+					failedFileCount++
+					continue
+				}
+				if err = os.Remove(fullPath); err != nil {
+					LOG_ERROR("RESTORE_SYMLINK", "Failed to remove the symbolic link %s: %v", fullPath, err)
+					return 0
+				}
+			}
 			newFile, err := os.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.GetPermissions())
 			if err != nil {
 				LOG_ERROR("DOWNLOAD_OPEN", "Failed to create empty file: %v", err)
@@ -912,7 +960,11 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	}
 
 	for _, entry := range directoryEntries {
-		dir := joinPath(top, entry.Path)
+		dir, err := guard.path(entry.Path)
+		if err != nil || isSymlink(dir) {
+			LOG_WARN("RESTORE_UNSAFE_PATH", "Skipped the attributes of %s: %v", entry.Path, err)
+			continue
+		}
 		entry.RestoreMetadata(dir, nil, setOwner)
 	}
 
@@ -1158,6 +1210,20 @@ func (manager *BackupManager) RestoreFile(chunkDownloader *ChunkDownloader, chun
 	preferencePath := GetDuplicacyPreferencePath()
 	temporaryPath := path.Join(preferencePath, "temporary")
 	fullPath := joinPath(top, entry.Path)
+
+	// Opening the path would follow a symbolic link and read or write its target, which may be anywhere
+	if isSymlink(fullPath) {
+		if !overwrite {
+			LOG_WERROR(allowFailures, "DOWNLOAD_OVERWRITE",
+				"%s is a symbolic link.  Please specify the -overwrite option to replace it", entry.Path)
+			return false, fmt.Errorf("symbolic link exists")
+		}
+		LOG_INFO("RESTORE_SYMLINK", "Replacing the symbolic link %s with a file", entry.Path)
+		if err := os.Remove(fullPath); err != nil {
+			LOG_ERROR("RESTORE_SYMLINK", "Failed to remove the symbolic link %s: %v", fullPath, err)
+			return false, nil
+		}
+	}
 
 	defer func() {
 		if existingFile != nil {

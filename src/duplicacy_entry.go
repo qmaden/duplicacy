@@ -540,9 +540,16 @@ func (entry *Entry) RestoreMetadata(fullPath string, fileInfo *os.FileInfo, setO
 		}
 	}
 
+	// The setuid and setgid bits are only restored together with the owner (like tar), so that restoring a
+	// snapshot without its ownership can't produce setuid files owned by the user running the restore
+	permissions := entry.GetPermissions()
+	if !setOwner {
+		permissions &^= os.ModeSetuid | os.ModeSetgid
+	}
+
 	// Only set the permission if the file is not a symlink
-	if !entry.IsLink() && (*fileInfo).Mode()&fileModeMask != entry.GetPermissions() {
-		err := os.Chmod(fullPath, entry.GetPermissions())
+	if !entry.IsLink() && (*fileInfo).Mode()&fileModeMask != permissions {
+		err := os.Chmod(fullPath, permissions)
 		if err != nil {
 			LOG_ERROR("RESTORE_CHMOD", "Failed to set the file permissions: %v", err)
 			return false
