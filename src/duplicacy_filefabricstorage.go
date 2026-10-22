@@ -582,6 +582,9 @@ func (storage *FileFabricStorage) UploadFile(threadIndex int, filePath string, c
 
 	rateLimitedReader := CreateRateLimitedReader(requestBody.Bytes(), storage.UploadRateLimit/storage.threads)
 	readCloser, _, _, err := storage.sendRequest(threadIndex, http.MethodPost, storage.getAPIURL("doUploadFiles"), headers, rateLimitedReader)
+	if err != nil {
+		return err
+	}
 
 	defer readCloser.Close()
 	defer io.Copy(ioutil.Discard, readCloser)

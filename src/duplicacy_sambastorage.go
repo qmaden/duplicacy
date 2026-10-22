@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,7 +32,7 @@ type SambaStorage struct {
 // CreateSambaStorage creates a file storage.
 func CreateSambaStorage(server string, port int, username string, password string, shareName string, storageDir string, threads int) (storage *SambaStorage, err error) {
 
-	address := fmt.Sprintf("%s:%d", server, port)
+	address := net.JoinHostPort(server, strconv.Itoa(port))
 	connection, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, err

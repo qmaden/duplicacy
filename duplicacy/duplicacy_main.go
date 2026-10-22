@@ -204,7 +204,7 @@ func runScript(context *cli.Context, storageName string, phase string) bool {
 	for _, line := range strings.Split(string(output), "\n") {
 		line := strings.TrimSpace(line)
 		if line != "" {
-			duplicacy.LOG_INFO("SCRIPT_OUTPUT", line)
+			duplicacy.LOG_INFO("SCRIPT_OUTPUT", "%s", line)
 		}
 	}
 

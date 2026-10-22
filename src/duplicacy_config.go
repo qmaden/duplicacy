@@ -84,9 +84,10 @@ type Config struct {
 	// for encrypting a non-chunk file
 	FileKey []byte `json:"-"`
 
-	// for erasure coding
-	DataShards   int `json:'data-shards'`
-	ParityShards int `json:'parity-shards'`
+	// For erasure coding.  The original struct tags were malformed, so these fields have always been stored under
+	// their Go names; the explicit tags keep it that way for compatibility with existing config files.
+	DataShards   int `json:"DataShards"`
+	ParityShards int `json:"ParityShards"`
 
 	// for RSA encryption
 	rsaPrivateKey *rsa.PrivateKey
