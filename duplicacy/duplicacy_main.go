@@ -1033,6 +1033,7 @@ func checkSnapshots(context *cli.Context) {
 	persist := context.Bool("persist")
 
 	backupManager.SetupSnapshotCache(preference.Name)
+	backupManager.SnapshotManager.ReverifyAfterDays = context.Int("reverify-days")
 	backupManager.SnapshotManager.CheckSnapshots(id, revisions, tag, showStatistics, showTabular, checkFiles, checkChunks, searchFossils, resurrect, rewrite, threads, persist)
 
 	runScript(context, preference.Name, "post")
@@ -1748,6 +1749,11 @@ func main() {
 				cli.BoolFlag{
 					Name:  "rewrite",
 					Usage: "rewrite chunks with recoverable corruption",
+				},
+				cli.IntFlag{
+					Name:     "reverify-days",
+					Usage:    "with -chunks, verify again chunks last verified more than <n> days ago (default: never)",
+					Argument: "<n>",
 				},
 				cli.BoolFlag{
 					Name:  "files",

@@ -191,6 +191,10 @@ type SnapshotManager struct {
 	snapshotCache *FileStorage
 
 	chunkOperator *ChunkOperator
+
+	// 'check -chunks' skips chunks verified before; with a positive value, chunks verified more than this many
+	// days ago are verified again so that later corruption is detected
+	ReverifyAfterDays int
 }
 
 // CreateSnapshotManager creates a snapshot manager
@@ -1025,12 +1029,14 @@ func (manager *SnapshotManager) CheckSnapshots(snapshotID string, revisionsToChe
 			LOG_WARN("SNAPSHOT_VERIFY", "Failed to parse the file containing verified chunks: %v", err)
 		}
 	}
-	numberOfVerifiedChunks := len(verifiedChunks)
+	// The number of entries added or refreshed since the file was last saved; re-verified chunks only get a new
+	// time, so counting entries would miss them
+	updatedVerifiedChunks := 0
 
 	saveVerifiedChunks := func() {
 		verifiedChunksLock.Lock()
 		defer verifiedChunksLock.Unlock()
-		if len(verifiedChunks) > numberOfVerifiedChunks {
+		if updatedVerifiedChunks > 0 {
 			var description []byte
 			description, err = json.Marshal(verifiedChunks)
 			if err != nil {
@@ -1040,8 +1046,8 @@ func (manager *SnapshotManager) CheckSnapshots(snapshotID string, revisionsToChe
 				if err != nil {
 					LOG_WARN("SNAPSHOT_VERIFY", "Failed to save the verified chunks file: %v", err)
 				} else {
-					LOG_INFO("SNAPSHOT_VERIFY", "Added %d chunks to the list of verified chunks", len(verifiedChunks)-numberOfVerifiedChunks)
-					numberOfVerifiedChunks = len(verifiedChunks)
+					LOG_INFO("SNAPSHOT_VERIFY", "Added %d chunks to the list of verified chunks", updatedVerifiedChunks)
+					updatedVerifiedChunks = 0
 				}
 			}
 		}
@@ -1057,12 +1063,20 @@ func (manager *SnapshotManager) CheckSnapshots(snapshotID string, revisionsToChe
 	var isMetadataChunks []bool
 
 	skippedChunks := 0
+	reverifiedChunks := 0
+	reverifyBefore := int64(0)
+	if manager.ReverifyAfterDays > 0 {
+		reverifyBefore = time.Now().Unix() - int64(manager.ReverifyAfterDays)*secondsInDay
+	}
 	for chunkHash, isMetadata := range *allChunkHashes {
 		if len(verifiedChunks) > 0 {
 			chunkID := manager.config.GetChunkIDFromHash(chunkHash)
-			if _, found := verifiedChunks[chunkID]; found {
-				skippedChunks++
-				continue
+			if verifiedAt, found := verifiedChunks[chunkID]; found {
+				if verifiedAt >= reverifyBefore {
+					skippedChunks++
+					continue
+				}
+				reverifiedChunks++
 			}
 		}
 		chunkHashes = append(chunkHashes, chunkHash)
@@ -1071,6 +1085,10 @@ func (manager *SnapshotManager) CheckSnapshots(snapshotID string, revisionsToChe
 
 	if skippedChunks > 0 {
 		LOG_INFO("SNAPSHOT_VERIFY", "Skipped %d chunks that have already been verified before", skippedChunks)
+	}
+	if reverifiedChunks > 0 {
+		LOG_INFO("SNAPSHOT_VERIFY", "Verifying %d chunks again that were last verified more than %d days ago",
+			reverifiedChunks, manager.ReverifyAfterDays)
 	}
 
 	var totalDownloadedChunkSize int64
@@ -1105,6 +1123,7 @@ func (manager *SnapshotManager) CheckSnapshots(snapshotID string, revisionsToChe
 					verifiedChunksLock.Lock()
 					now := time.Now().Unix()
 					verifiedChunks[chunkID] = now
+					updatedVerifiedChunks++
 					if now > lastSaveTime+5*60 {
 						lastSaveTime = now
 						verifiedChunksLock.Unlock()

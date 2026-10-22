@@ -396,3 +396,62 @@ func TestResumeChecksIncompleteChunks(t *testing.T) {
 		}
 	}
 }
+
+// B5: 'check -chunks' never verified a chunk again once it had passed, so later corruption went unnoticed.
+func TestCheckReverifiesOldChunks(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	manager, top := openFixture(t, "plain-lz4")
+	snapshotManager := manager.SnapshotManager
+	check := func(reverifyDays int) string {
+		snapshotManager.ReverifyAfterDays = reverifyDays
+		return expectLogError(func() {
+			snapshotManager.CheckSnapshots(fixtureSnapshotID, []int{1, 2}, "", false, false, false, true, false, false,
+				false, 1, true)
+		})
+	}
+	if message := check(0); message != "" {
+		t.Fatalf("The first check failed: %s", message)
+	}
+
+	// Corrupt one chunk in the storage
+	storageDir := filepath.Join(filepath.Dir(top), "storage")
+	var corrupted string
+	filepath.Walk(filepath.Join(storageDir, "chunks"), func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && corrupted == "" && info.Size() > 100 {
+			corrupted = path
+		}
+		return nil
+	})
+	content, _ := os.ReadFile(corrupted)
+	for i := 50; i < 60; i++ {
+		content[i] ^= 0xff
+	}
+	os.WriteFile(corrupted, content, 0600)
+
+	if message := check(0); message != "" {
+		t.Fatalf("Chunks verified before should have been skipped: %s", message)
+	}
+
+	// Pretend the chunks were verified 10 days ago
+	cacheFile := filepath.Join(top, DUPLICACY_DIRECTORY, "cache", "default", "verified_chunks")
+	var verified map[string]int64
+	description, _ := os.ReadFile(cacheFile)
+	if err := json.Unmarshal(description, &verified); err != nil || len(verified) == 0 {
+		t.Fatalf("No verified chunks were recorded: %v", err)
+	}
+	for chunkID, verifiedAt := range verified {
+		verified[chunkID] = verifiedAt - 10*secondsInDay
+	}
+	description, _ = json.Marshal(verified)
+	os.WriteFile(cacheFile, description, 0600)
+
+	if message := check(30); message != "" {
+		t.Errorf("Chunks verified less than 30 days ago were verified again: %s", message)
+	}
+	if message := check(5); !strings.Contains(message, "corrupted") {
+		t.Errorf("Re-verification didn't detect the corrupted chunk: %q", message)
+	}
+}
