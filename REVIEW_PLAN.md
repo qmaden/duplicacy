@@ -181,6 +181,7 @@ Add a **golden-fixture test suite**: a checked-in storage directory with encrypt
 | 5 | B4, B5, B6, B7 | M–L |
 | 6 | P2, P3, P4, P6 | M |
 | 7 | S4, S7, dependency upgrades | L |
+| 6b | Performance quick wins C1, C2, M1, I1, then I3, C3, W1 (section 9.5) | M |
 | Ongoing | FORMAT.md with fixtures, SECURITY docs, CHANGELOG/UPGRADING, generated command reference (section 8) | M, spread across phases |
 
 XS < ½ day, S ≈ 1–2 days, M ≈ 3–5 days, L ≈ 1–2 weeks.
@@ -424,3 +425,107 @@ Optionally add short nested files later (for example `src/AGENTS.md` for backend
 | Phase 3+ | Doc comments on exported API, ADRs for major decisions (Go vs Rust, KDF upgrade, separate metadata) | S, ongoing |
 
 **Done when:** the README no longer depends on the upstream wiki, every command in AGENTS.md runs in CI, FORMAT.md sections each have a passing fixture, and generated docs and acknowledgements are checked in CI.
+
+---
+
+## 9. Performance investigation: memory, CPU and I/O (measured 2026-10-22)
+
+### 9.1 Method
+
+- **Machine**: Apple Silicon, 8 cores (arm64), 16 GB RAM, macOS. Go 1.26.10.
+- **Micro-benchmarks**: 4 MiB chunks of half random, half text-like data (temporary `_test.go` file, not committed).
+- **End-to-end**: encrypted local file storage, default LZ4 compression, `-threads 4`, synthetic 1.1 GB repository (8 × 128 MiB files + 20,000 small files of 0.1–8 KB), data in the page cache. CPU and heap profiles came from the CLI's existing `-profile <addr>` pprof endpoint; wall time, CPU time and peak RSS from `/usr/bin/time -l`.
+- **Caveats**: local storage with a warm cache isolates CPU, memory and syscall costs. Cloud backends are usually latency-bound (9.5), and amd64 numbers will differ (BLAKE2b and HighwayHash have AVX2 paths there). Re-run on Linux/amd64 with a real disk and one cloud backend before finalizing targets.
+- **Prototype patch** (not committed): `/private/tmp/claude-501/-Users-maden-Documents-Linux-Apps-duplicacy-fork/eef893b9-b295-4410-99f7-56ddbe128ce4/scratchpad/perf_prototypes.patch`. It lives in the session scratchpad, so copy it out if you want to keep it.
+
+### 9.2 Baseline: where the time and memory go
+
+| Component (per 4 MiB chunk, one goroutine) | Throughput | Allocated per chunk |
+|---|---|---|
+| Encrypt, LZ4 (default) | 267 MB/s | 4.9 MB |
+| Encrypt, zstd default / best | 340 / 126 MB/s | **21 MB / 105 MB** (new encoder per chunk) |
+| Decrypt, LZ4 / zstd | 363 / 578 MB/s | 4.2 / 12.9 MB |
+| Keyed BLAKE2b (`minio/blake2b-simd`, chunk hash and file hash) | 705 MB/s | – |
+| HighwayHash-64 (in-memory chunk checksum) | 7,600 MB/s | – (the checksum costs almost nothing) |
+| Content-defined chunker incl. hashing (**single goroutine for the whole backup**) | **220 MB/s** | – |
+
+**Backup profile:** about 60% of CPU samples are in the single `ChunkMaker.AddData` goroutine. That goroutine does synchronous `read()` calls (21% of samples), BLAKE2b (about 21%; the chunker hashes every byte twice, once for the chunk ID and once for the file hash), buzhash and memmove. LZ4 encoding takes another 21%. The process used only 1.2–1.3 cores despite `-threads 4`.
+
+**Restore profile:** about 60% of samples are per-file syscalls (`open` 20%, `chmod`/`chtimes`/xattr 17%, writes 9%, seeks 5%), all issued one file at a time from the main goroutine. BLAKE2b re-verification is 24% and LZ4 decoding 9%.
+
+**Heap during backup:**
+- Chunk buffers dominate: each is pre-grown to the 16 MiB **maximum** chunk size although the average is 4 MiB, and about 20 are in flight.
+- Extended attributes of every entry stay in memory: `xattr.get` 19.5 MB plus 7.5 MB of map overhead for 20,000 files. New files on macOS carry `com.apple.provenance`, so this extrapolates to **about 1.3 GB per million files**, held up to the default `-max-in-memory-entries` of 1M. That matches upstream #602.
+
+### 9.3 Prototype results
+
+| | Backup wall | Backup CPU | Backup peak RSS | Restore wall | Restore CPU | Restore peak RSS |
+|---|---|---|---|---|---|---|
+| Baseline | 7.1–8.7 s | 10.0–10.5 s | 441–500 MB | 5.84 s | 8.56 s | 426 MB |
+| C1 + C2 + M1 + I1 | 6.9–7.1 s | 8.3–8.5 s (**−17%**) | **258–289 MB (−40%)** | 5.37 s (−8%) | 7.33 s (−14%) | 334 MB (−22%) |
+| + C3 read-ahead and file hash on a second core | **5.4–5.5 s (−24 to −38%)** | 8.5 s | 312–338 MB (−30%) | 5.40 s | 7.37 s | 363 MB |
+
+Micro-level gains: LZ4 encrypt 267 → 383 MB/s and decrypt 363 → 544 MB/s; allocations per chunk 4.9 MB → 65 KB (LZ4) and 21 MB → 116 KB (zstd). Restore is bound by sequential per-file syscalls, which none of the prototypes address (see I3).
+
+**Compatibility:**
+- The **unmodified binary restored the prototype's backup byte-for-byte**.
+- pierrec/lz4 and go-lz4 decode each other's output, tested up to 16 MiB.
+- `minio/blake2b-simd` and `x/crypto/blake2b` produce identical keyed hashes.
+- Unit and race tests pass on the prototype.
+
+### 9.4 Recommendations
+
+#### CPU
+
+| # | Change | Evidence | Gain | Risk / compatibility |
+|---|--------|----------|------|----------------------|
+| C1 | Replace `bkaradzic/go-lz4` with **`pierrec/lz4/v4` block API**, keeping the 4-byte length framing; fall back to go-lz4 when `CompressBlock` returns 0 (incompressible input) | 1,311 vs 527 MB/s encode, 2,148 vs 826 MB/s decode, no 512 KiB hash table allocated per call | 2.5× LZ4 encode, 2.6× decode | Format-compatible both ways (tested). Also enables a **bounded decode** (rejects length > limit), which fixes the LZ4 part of S5. The limit must allow configs without chunk sizes (the `config` file is decoded with `MaximumChunkSize == 0`) |
+| C2 | **Pool zstd encoders** (`EncodeAll`, `WithEncoderConcurrency(1)`, one pool per level) and one **shared decoder** (`DecodeAll` into the chunk buffer, `WithDecoderMaxMemory`) | 21–105 MB allocated per chunk drops to about 0.1–1.8 MB; +20% on a single core | Large GC and memory reduction, better scaling with `-threads` | Valid zstd frames either way. Fixes the zstd part of S5 |
+| C3 | **Pipeline the chunker**: (a) read-ahead goroutine that also computes the file hash (prototyped); (b) next, move the keyed BLAKE2b chunk hash out of the chunker into the upload workers, with the dedup check moved there too (concurrent set) | Chunker is the single-thread ceiling (220 MB/s), and BLAKE2b is 53% of it | (a) −24% backup wall measured; (b) estimated about 2× chunker throughput | No format change. (b) touches chunk-index ordering and the `chunkCache`, so it needs careful tests (B2 metadata-dedup fix goes in the same area) |
+| C4 | Swap `minio/blake2b-simd` (unmaintained since 2016) for `golang.org/x/crypto/blake2b` | Identical output; +8% on arm64 (both pure Go there) | Small on arm64; measure on amd64 (both have AVX2) | Low; keep the golden test |
+| C5 | Skip the file hash for unchanged files in quick mode (already true), and avoid the double BLAKE2b in `check -files` by verifying chunk IDs only when `-chunks` already did so | Code review | Workload-dependent | Low |
+
+#### Memory
+
+| # | Change | Evidence | Gain |
+|---|--------|----------|------|
+| M1 | Size chunk buffers from **2 × average** chunk size instead of the maximum; let rare big chunks grow; release buffers above a cap back to the GC instead of the pool | Prototype | **−30 to −40% backup RSS** |
+| M2 | **Extended attributes**: read them only when the entry is encoded (`UploadSnapshot`), or keep them in the on-disk entry list; optionally ignore noise attributes (e.g. `com.apple.provenance`, configurable) | 27 MB per 20k files measured, about 1.3 GB per 1M files | Large for big macOS repositories (#602) |
+| M3 | Make `-max-in-memory-entries` memory-based (spill to disk past N MB) or lower the 1M default | 1M entries with paths and attributes is GBs | Bounded memory on large trees |
+| M4 | Size the chunk and buffer pools by `threads`, not `NumCPU()*16` (also P6) | 256-core hosts (#658 thread) | Predictable memory |
+| M5 | Add `-memory-limit` (`debug.SetMemoryLimit`) and document `GOMEMLIMIT`/`GOGC` for NAS and containers (#340) | Standard Go runtime knobs | Avoids OOM kills |
+
+#### I/O
+
+| # | Change | Evidence | Gain |
+|---|--------|----------|------|
+| I1 | `FileStorage.UploadFile`: write the chunk with **one `Write`** when no rate limit is set (today `io.Copy` through `RateLimitedReader` writes 32 KiB at a time); likewise read whole chunk files with one sized read | Code: no `WriterTo`/`ReaderFrom` | Fewer syscalls; fixes #670 (SMR drives) |
+| I2 | Read-ahead for large files (C3a), plus sequential-access hints (`posix_fadvise(SEQUENTIAL)` on Linux, `F_RDAHEAD` on macOS) | Backup `read()` was 21% of samples, synchronous | Overlaps disk I/O with hashing; bigger on spinning disks and network filesystems |
+| I3 | **Restore**: a worker pool for independent small files (write, `chmod`, `chtimes`, xattrs in parallel); write new files directly instead of through `.duplicacy/temporary` plus rename (rename only when replacing); fix the prefetch stop (PR #542) | Restore is 60% per-file syscalls, sequential | Several-fold on many small files (#541) |
+| I4 | Skip xattr restore when the entry has none and the file has none (avoid `listxattr` per file) | `SetAttributesToFile` shows 9% of restore samples | Small but free |
+
+#### Network (from code review; measure against a real backend)
+
+| # | Change | Evidence | Gain |
+|---|--------|----------|------|
+| W1 | **Shared, tuned `http.Transport`** per storage: `MaxIdleConnsPerHost >= threads`, HTTP/2 where supported, dial/TLS/response-header timeouts | B2, OneDrive, WebDAV, FileFabric and ACD use `http.DefaultClient`: **2 idle connections per host** and no timeouts | Avoids a TCP+TLS handshake for most requests at `-threads > 2`; no more hangs (#644, #480) |
+| W2 | Stop per-chunk HEAD calls on incremental backups where possible (listing cache or Bloom filter, P5); stop the `CleanSnapshotCache` HEAD storm (P4); prefetch metadata chunks in parallel (P3) | Code review | Large on high-latency backends |
+| W3 | Unified retry with exponential backoff and a time budget (N10), honoring `Retry-After` without consuming attempts (#689) | Upstream issues | Fewer failed runs |
+| W4 | S3: `ListObjectsV2` (PR #655), multipart for large chunks where cheaper, close idle connections on exit (#688) | Upstream PRs and issues | Faster listing, cleaner shutdown |
+
+#### Concurrency and measurement
+
+- Replace the `Sleep(100ms)` polling in `ChunkOperator` with a `sync.WaitGroup` (P7). Every `WaitForCompletion` currently adds up to 100 ms, which shows up on small operations.
+- Commit the micro-benchmarks (encrypt/decrypt per codec, chunker, hashing) and an end-to-end benchmark script using a generated dataset; track results in CI so regressions are visible.
+- Profile on Linux/amd64 and one cloud backend before setting final targets.
+
+### 9.5 Suggested order (fits Phase 4 in section 3)
+
+1. **C1, C2, M1, I1**: small, independent, format-compatible; together −17% CPU and −40% RSS on backup. *(Effort S–M.)*
+2. **I3** restore worker pool and direct writes, plus PR #542. *(M.)*
+3. **C3a** read-ahead with file hashing (measured −24% wall), then **C3b** chunk hashing in workers. *(M–L; do after the B2 fix because they touch the same code.)*
+4. **W1** shared HTTP transport and timeouts, then W2/W3. *(M.)*
+5. **M2, M3, M4, M5** memory bounding for very large trees. *(M.)*
+6. **C4** BLAKE2b swap, benchmarks in CI. *(S.)*
+
+**Targets to verify after each step** (same dataset, `-threads 4`): backup ≥ 1.5× faster than baseline, peak RSS ≤ 60% of baseline, restore of 20k small files ≥ 2× faster, and no change in what the unmodified binary restores.
