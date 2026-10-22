@@ -110,8 +110,13 @@ func (manager *BackupManager) SetupSnapshotCache(storageName string) bool {
 		return false
 	}
 
+	// The cache holds decrypted metadata (file names, sizes and hashes), so only the owner may read it
+	if err = storage.makePrivate(); err != nil {
+		LOG_WARN("BACKUP_CACHE", "Failed to restrict the permissions of the snapshot cache: %v", err)
+	}
+
 	for _, subdir := range []string{"chunks", "snapshots"} {
-		err := os.Mkdir(path.Join(cacheDir, subdir), 0744)
+		err := os.Mkdir(path.Join(cacheDir, subdir), 0700)
 		if err != nil && !os.IsExist(err) {
 			LOG_ERROR("BACKUP_CACHE", "Failed to create the snapshot cache subdir: %v", err)
 			return false
@@ -663,7 +668,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 		}
 	}
 
-	err = os.Mkdir(path.Join(top, DUPLICACY_DIRECTORY), 0744)
+	err = os.Mkdir(path.Join(top, DUPLICACY_DIRECTORY), 0700)
 	if err != nil && !os.IsExist(err) {
 		LOG_ERROR("RESTORE_MKDIR", "Failed to create the preference directory: %v", err)
 		return 0

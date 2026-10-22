@@ -309,7 +309,7 @@ func configRepository(context *cli.Context, init bool) {
 			return
 		}
 
-		err = os.Mkdir(preferencePath, 0744)
+		err = os.Mkdir(preferencePath, 0700)
 		if err != nil && !os.IsExist(err) {
 			duplicacy.LOG_ERROR("REPOSITORY_INIT", "Failed to create the directory %s: %v",
 				preferencePath, err)

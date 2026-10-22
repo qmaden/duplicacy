@@ -539,7 +539,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 
 		accessKey := GetPassword(preference, "s3_id", "Enter S3 Access Key ID:", true, resetPassword)
-		secretKey := GetPassword(preference, "s3_secret", "Enter S3 Secret Access Key:", true, resetPassword)
+		secretKey := GetPassword(preference, "s3_secret", "Enter S3 Secret Access Key:", false, resetPassword)
 
 		var err error
 
@@ -600,7 +600,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 
 	} else if matched[1] == "dropbox" {
 		storageDir := matched[3] + matched[5]
-		token := GetPassword(preference, "dropbox_token", "Enter Dropbox refresh token:", true, resetPassword)
+		token := GetPassword(preference, "dropbox_token", "Enter Dropbox refresh token:", false, resetPassword)
 		dropboxStorage, err := CreateDropboxStorage(token, storageDir, 1, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the dropbox storage: %v", err)
@@ -613,7 +613,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		storageDir := matched[5]
 
 		accountID := GetPassword(preference, "b2_id", "Enter Backblaze account or application id:", true, resetPassword)
-		applicationKey := GetPassword(preference, "b2_key", "Enter corresponding Backblaze application key:", true, resetPassword)
+		applicationKey := GetPassword(preference, "b2_key", "Enter corresponding Backblaze application key:", false, resetPassword)
 
 		b2Storage, err := CreateB2Storage(accountID, applicationKey, "", bucket, storageDir, threads)
 		if err != nil {
@@ -631,7 +631,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		storageDir := matched[4]
 
 		accountID := GetPassword(preference, "b2_id", "Enter Backblaze account or application id:", true, resetPassword)
-		applicationKey := GetPassword(preference, "b2_key", "Enter corresponding Backblaze application key:", true, resetPassword)
+		applicationKey := GetPassword(preference, "b2_key", "Enter corresponding Backblaze application key:", false, resetPassword)
 
 		b2Storage, err := CreateB2Storage(accountID, applicationKey, downloadURL, bucket, storageDir, threads)
 		if err != nil {
@@ -651,7 +651,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 
 		prompt := fmt.Sprintf("Enter the Access Key for the Azure storage account %s:", account)
-		accessKey := GetPassword(preference, "azure_key", prompt, true, resetPassword)
+		accessKey := GetPassword(preference, "azure_key", prompt, false, resetPassword)
 
 		azureStorage, err := CreateAzureStorage(account, accessKey, container, threads)
 		if err != nil {
@@ -725,7 +725,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		if client_id != "" {
 			// client_secret should go into keyring
 			prompt = fmt.Sprintf("Enter client_secret for custom Azure app (if empty will use duplicacy.com one):")
-			client_secret = GetPassword(preference, matched[1]+"_client_secret", prompt, true, resetPassword)
+			client_secret = GetPassword(preference, matched[1]+"_client_secret", prompt, false, resetPassword)
 		}
 
 		oneDriveStorage, err := CreateOneDriveStorage(tokenFile, matched[1] == "odb", storagePath, threads, client_id, client_secret, drive_id)
@@ -752,7 +752,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		return hubicStorage
 	} else if matched[1] == "swift" {
 		prompt := fmt.Sprintf("Enter the OpenStack Swift key:")
-		key := GetPassword(preference, "swift_key", prompt, true, resetPassword)
+		key := GetPassword(preference, "swift_key", prompt, false, resetPassword)
 		swiftStorage, err := CreateSwiftStorage(storageURL[8:], key, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the OpenStack Swift storage at %s: %v", storageURL, err)
@@ -779,7 +779,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 
 		prompt := fmt.Sprintf("Enter the WebDAV password:")
-		password := GetPassword(preference, "webdav_password", prompt, true, resetPassword)
+		password := GetPassword(preference, "webdav_password", prompt, false, resetPassword)
 		webDAVStorage, err := CreateWebDAVStorage(server, port, username, password, storageDir, useHTTP, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the WebDAV storage at %s: %v", storageURL, err)
@@ -791,7 +791,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		endpoint := matched[3]
 		storageDir := matched[5]
 		prompt := fmt.Sprintf("Enter the token for accessing the Storage Made Easy File Fabric storage:")
-		token := GetPassword(preference, "fabric_token", prompt, true, resetPassword)
+		token := GetPassword(preference, "fabric_token", prompt, false, resetPassword)
 		smeStorage, err := CreateFileFabricStorage(endpoint, token, storageDir, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the File Fabric storage at %s: %v", storageURL, err)
@@ -808,8 +808,8 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 			storageDir = bucket[index+1:]
 			bucket = bucket[:index]
 		}
-		apiKey := GetPassword(preference, "storj_key", "Enter the API access key:", true, resetPassword)
-		passphrase := GetPassword(preference, "storj_passphrase", "Enter the passphrase:", true, resetPassword)
+		apiKey := GetPassword(preference, "storj_key", "Enter the API access key:", false, resetPassword)
+		passphrase := GetPassword(preference, "storj_passphrase", "Enter the passphrase:", false, resetPassword)
 		storjStorage, err := CreateStorjStorage(satellite, apiKey, passphrase, bucket, storageDir, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the Storj storage at %s: %v", storageURL, err)
@@ -845,7 +845,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		storageDir = storageDir[index+1:]
 
 		prompt := fmt.Sprintf("Enter the SAMBA password:")
-		password := GetPassword(preference, "smb_password", prompt, true, resetPassword)
+		password := GetPassword(preference, "smb_password", prompt, false, resetPassword)
 		sambaStorage, err := CreateSambaStorage(server, port, username, password, shareName, storageDir, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the SAMBA storage at %s: %v", storageURL, err)

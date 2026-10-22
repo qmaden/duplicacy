@@ -282,3 +282,39 @@ func TestBackupCountsSkippedEntries(t *testing.T) {
 		t.Errorf("%d skipped entries reported instead of 1", manager.SkippedEntries)
 	}
 }
+
+// S9: the snapshot cache holds decrypted metadata, so it must only be readable by its owner.  Local storages keep
+// their permissions, since they are sometimes shared on purpose.
+func TestSnapshotCacheIsPrivate(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	manager, top := openFixture(t, "plain-lz4")
+	cacheDir := filepath.Join(top, DUPLICACY_DIRECTORY, "cache", "default")
+	if info, err := os.Stat(cacheDir); err != nil || info.Mode().Perm() != 0700 {
+		t.Errorf("The snapshot cache directory has mode %v (error %v)", info.Mode().Perm(), err)
+	}
+	if err := manager.snapshotCache.UploadFile(0, "chunks/ab/test", []byte("decrypted metadata")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"chunks/ab", "chunks/ab/test"} {
+		info, err := os.Stat(filepath.Join(cacheDir, name))
+		expected := os.FileMode(0600)
+		if info != nil && info.IsDir() {
+			expected = 0700
+		}
+		if err != nil || info.Mode().Perm() != expected {
+			t.Errorf("%s in the snapshot cache has mode %v instead of %v (error %v)", name, info.Mode().Perm(), expected, err)
+		}
+	}
+
+	storageDir := t.TempDir()
+	storage, _ := CreateFileStorage(storageDir, false, 1)
+	if err := storage.UploadFile(0, "chunks/ab/test", []byte("chunk")); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := os.Stat(filepath.Join(storageDir, "chunks", "ab", "test")); info.Mode().Perm() != 0644 {
+		t.Errorf("A local storage file has mode %v instead of 0644", info.Mode().Perm())
+	}
+}

@@ -23,6 +23,9 @@ type FileStorage struct {
 	isCacheNeeded   bool // Network storages require caching
 	storageDir      string
 	numberOfThreads int
+
+	directoryMode os.FileMode // permissions for new directories
+	fileMode      os.FileMode // permissions for new files
 }
 
 // CreateFileStorage creates a file storage.
@@ -54,6 +57,8 @@ func CreateFileStorage(storageDir string, isCacheNeeded bool, threads int) (stor
 		storageDir:      storageDir,
 		isCacheNeeded:   isCacheNeeded,
 		numberOfThreads: threads,
+		directoryMode:   0744,
+		fileMode:        0644,
 	}
 
 	// Random number fo generating the temporary chunk file suffix.
@@ -106,7 +111,7 @@ func (storage *FileStorage) MoveFile(threadIndex int, from string, to string) (e
 
 // CreateDirectory creates a new directory.
 func (storage *FileStorage) CreateDirectory(threadIndex int, dir string) (err error) {
-	err = os.Mkdir(path.Join(storage.storageDir, dir), 0744)
+	err = os.Mkdir(path.Join(storage.storageDir, dir), storage.directoryMode)
 	if err != nil && os.IsExist(err) {
 		return nil
 	} else {
@@ -160,7 +165,7 @@ func (storage *FileStorage) UploadFile(threadIndex int, filePath string, content
 			if !os.IsNotExist(err) {
 				return err
 			}
-			err = os.MkdirAll(dir, 0744)
+			err = os.MkdirAll(dir, storage.directoryMode)
 			if err != nil {
 				return err
 			}
@@ -179,7 +184,7 @@ func (storage *FileStorage) UploadFile(threadIndex int, filePath string, content
 
 	temporaryFile := fullPath + "." + string(suffix) + ".tmp"
 
-	file, err := os.OpenFile(temporaryFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	file, err := os.OpenFile(temporaryFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, storage.fileMode)
 	if err != nil {
 		return err
 	}
@@ -217,6 +222,14 @@ func (storage *FileStorage) UploadFile(threadIndex int, filePath string, content
 	}
 
 	return nil
+}
+
+// makePrivate restricts the storage to its owner: new files and directories are only accessible by the owner, and
+// so is the top directory.  It is used for the snapshot cache, which holds decrypted metadata.
+func (storage *FileStorage) makePrivate() error {
+	storage.directoryMode = 0700
+	storage.fileMode = 0600
+	return os.Chmod(storage.storageDir, 0700)
 }
 
 // If a local snapshot cache is needed for the storage to avoid downloading/uploading chunks too often when

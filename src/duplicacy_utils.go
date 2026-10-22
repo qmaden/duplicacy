@@ -239,7 +239,8 @@ func GetPassword(preference Preference, passwordType string, prompt string,
 		password = scanner.Text()
 	} else {
 		passwordInBytes, err := gopass.GetPasswdMasked()
-		if err != nil {
+		// Piped input may end without a newline
+		if err != nil && !(err == io.EOF && len(passwordInBytes) > 0) {
 			LOG_ERROR("PASSWORD_READ", "Failed to read the password: %v", err)
 			return ""
 		}

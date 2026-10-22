@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -208,7 +209,12 @@ func (client *ACDClient) RefreshToken() (err error) {
 		return err
 	}
 
-	err = ioutil.WriteFile(client.TokenFile, description, 0644)
+	// The file holds a refresh token, so only the owner may read it; WriteFile doesn't change the permissions
+	// of an existing file
+	err = ioutil.WriteFile(client.TokenFile, description, 0600)
+	if err == nil {
+		err = os.Chmod(client.TokenFile, 0600)
+	}
 	if err != nil {
 		return err
 	}
