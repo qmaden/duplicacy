@@ -37,6 +37,31 @@ go test -count=1 -run 'TestBackupManager|TestPersistRestore|TestStorage|TestPrun
 
 CI runs each of these.
 
+## Cloud backends without credentials
+
+The S3, Google Cloud Storage and Google Drive backends are tested against in-process fakes (`gofakes3`,
+`fake-gcs-server` and a small Drive API fake in `duplicacy_gcdstorage_test.go`): `TestS3Storage`,
+`TestGCSStorage` and `TestGCDStorage` run in the normal suite. The same fakes can stand in for a storage in the
+backup, prune and copy tests:
+
+```bash
+cd src && go test -count=1 -run 'TestStorage$|TestBackupManager|TestPrune|TestCopySnapshots' . -args -storage fake-gcd
+```
+
+Azure is tested against Azurite, the Azure Storage emulator, started with any base64 account key:
+
+```bash
+KEY=$(openssl rand -base64 64 | tr -d '\n')
+docker run -d -p 127.0.0.1:10000:10000 -e AZURITE_ACCOUNTS="test:$KEY" \
+    mcr.microsoft.com/azure-storage/azurite azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+export DUPLICACY_TEST_AZURITE_URL=http://127.0.0.1:10000/test DUPLICACY_TEST_AZURITE_ACCOUNT=test DUPLICACY_TEST_AZURITE_KEY=$KEY
+cd src && go test -count=1 -run 'TestAzureStorage|TestStorage$|TestBackupManager' . -args -storage azurite
+```
+
+Without those variables `TestAzureStorage` is skipped. CI runs all four (`fake-s3`, `fake-gcs`, `fake-gcd`,
+`azurite`) plain and with `-erasure-coding` and `-separate-metadata`. `TestPersistRestore` only works with local
+storage.
+
 ## Real storage backends
 
 `-storage <name>` selects a backend described in `src/test_storage.conf` (JSON, one object per storage name;

@@ -50,8 +50,20 @@ and earlier versions can read storages written by this one.
   connect or more than 5 minutes before the server starts responding; the request is then retried as above.
   Transfers themselves have no time limit.
 
+### Storage SDKs
+
+- S3, MinIO and Wasabi now use `aws-sdk-go-v2`, Azure the official `azblob` SDK, and Google Cloud Storage the Cloud
+  Storage JSON API client. URLs, credentials and stored data are unchanged, and nothing needs to be done. If an
+  S3-compatible service stops working, report it and use the `s3c://` client meanwhile.
+- `minio://` and `s3://` URLs with a custom endpoint and no `region@` are signed for `us-east-1`.
+- A failed Google Cloud Storage upload is now reported (it used to be counted as a success), so a backup to GCS can
+  now fail where it used to appear to succeed. Run `check` on GCS storages backed up by earlier versions.
+
 ### Memory
 
+- Backup now hashes chunks on the upload threads and keeps the upload queue full, which uses some more memory
+  (in a 2 GB test, peak memory went from about 300 to 340–400 MB). The list of files of a backup in progress moves
+  to disk once it uses about 128 MiB.
 - The new global option `-memory-limit <MB>` (or the `GOMEMLIMIT` environment variable) makes the garbage
   collector keep memory below the limit where possible, at some CPU cost. It is a soft limit: a backup that needs
   more still gets it.

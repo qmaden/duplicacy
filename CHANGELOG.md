@@ -22,6 +22,8 @@ All notable changes to this fork are listed here. The format follows
 - Global option `-memory-limit <MB>` sets a soft memory limit for the Go runtime (upstream #340).
 - Failed chunk uploads and downloads are retried up to three times, after 2, 8 and 30 seconds (upstream #683).
 - Benchmarks for chunk encryption, decryption and chunking (`go test -bench . ./src`).
+- Tests for the cloud backends without credentials: in-process fakes of S3, Google Cloud Storage and Google Drive,
+  and Azurite for Azure (`-storage fake-s3`, `fake-gcs`, `fake-gcd`, `azurite`); they run in CI.
 - Documentation: generated command reference (`docs/COMMANDS.md`), `docs/storage-backends.md`,
   `docs/ARCHITECTURE.md`, `docs/PRUNE_SAFETY.md` and decision records in `docs/adr/`; the README describes the fork.
 
@@ -39,7 +41,8 @@ All notable changes to this fork are listed here. The format follows
 - RSA private keys in the OpenSSH format and unencrypted PKCS#8 are supported; inline keys are no longer printed in
   error messages.
 - Dependency upgrades fix GO-2026-5841 (klauspost/compress), GO-2022-0391 (aws-sdk-go) and GO-2024-2611
-  (protobuf).
+  (protobuf), and remove the vulnerable gRPC 1.28 and the unmaintained `dgrijalva/jwt-go`. govulncheck reports
+  no known vulnerability in the packages Duplicacy imports.
 
 ### Changed
 
@@ -57,6 +60,15 @@ All notable changes to this fork are listed here. The format follows
   across files (upstream #541). Extended attributes are read when each entry is stored instead of being kept for
   the whole backup (backing up 200,000 files on macOS: peak memory 743 MB to 198 MB). Waiting for chunk
   operations no longer polls every 100 ms, which made prune with many chunks much slower than needed.
+- Backup hashes chunks on the upload threads instead of the single chunking thread: backing up 2 GB to a local
+  storage takes 41% less time (peak memory is somewhat higher, since the upload queue stays full).
+- Restore sets file permissions, times and extended attributes on 8 threads (16% faster for many small files).
+- The list of entries of a backup in progress moves to disk once it uses about 128 MiB, not only after
+  `-max-in-memory-entries` entries.
+- Storage SDKs: S3, MinIO and Wasabi use `aws-sdk-go-v2`; Azure uses the official `azblob` SDK instead of a 2018
+  fork; Google Cloud Storage uses the Cloud Storage JSON API client, and Google Drive the current
+  `google.golang.org/api`. URLs, credentials and stored data are unchanged.
+- `vmihailenco/msgpack` v5 (snapshot file lists are written byte for byte as before).
 - B2, OneDrive, WebDAV, File Fabric and Wasabi reuse one connection per thread and time out stalled connections
   (30 s to connect, 5 minutes for a response to start) instead of hanging (upstream #644, #480).
 - SFTP tries keys from a running ssh-agent before asking for a password or a key file (upstream #687); the SSH key
@@ -83,5 +95,9 @@ All notable changes to this fork are listed here. The format follows
 - With patterns, restore left the directories above restored files with default permissions (upstream #84).
 - The chunk operator could report completion before all queued tasks had finished; copy counted chunks with a data
   race and reported existing chunks as copied; restore progress used a stale total.
+- A failed Google Cloud Storage upload was reported as a success.
+- Listing chunks on Google Drive could hang (prune, check), and its retry counters had a data race.
+- S3: only the first 1,000 snapshot ids were listed.
+- An interrupted backup saved each entry of its file list twice when the list was still in memory.
 - Version 0 snapshot entries were not checked against the chunk list; file hashes ignored read errors; restore
   removed the old file before renaming the new one over it; a path prefix test matched sibling directories.

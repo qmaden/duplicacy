@@ -22,9 +22,11 @@ format are restored byte for byte in CI.
   malformed chunks rejected without crashing.
 - **Correctness**: fixes to `check`, resume, prune retention and clock-skew handling, restore with `-delete`, the
   separate metadata directory, and many races. `backup -strict` exits non-zero when files were skipped.
-- **Performance**: faster LZ4 and pooled zstd codecs, read-ahead and hashing on a second core, parallel metadata
-  downloads, prefetching across files on restore, automatic retries of failed chunk transfers, and a
-  `-memory-limit` option.
+- **Performance**: faster LZ4 and pooled zstd codecs, read-ahead and chunk hashing spread over several cores,
+  parallel metadata downloads, prefetching across files and parallel attribute setting on restore, automatic
+  retries of failed chunk transfers, and a `-memory-limit` option.
+- **Dependencies**: current SDKs for S3 (aws-sdk-go-v2), Azure (azblob) and Google; cloud backends tested in CI
+  against fakes and emulators.
 - **Tooling**: Go 1.26.10 (Go 1.27 also builds), CI with race tests, fuzzing, staticcheck and govulncheck.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md); behaviour changes you may need to act on are in

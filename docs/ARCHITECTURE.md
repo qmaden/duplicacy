@@ -20,11 +20,11 @@ How the code is organized and how the main commands move data. The on-storage fo
 |-------------|------|
 | `Config` (`config.go`) | The storage's `config` file: chunk size parameters, the hash, id, chunk and file keys, compression level, RSA and erasure-coding settings. Also owns the chunk buffer pool (`GetChunk` / `PutChunk`). |
 | `Chunk` (`chunk.go`) | A chunk's bytes plus its hasher. `Encrypt` and `Decrypt` turn plaintext into the stored form and back (compression, AES-GCM, RSA, erasure coding). Codec helpers are in `compression.go`. |
-| `ChunkMaker` (`chunkmaker.go`) | Splits a stream of files into variable-size chunks with a buzhash rolling hash, and computes each file's hash. |
+| `ChunkMaker` (`chunkmaker.go`) | Splits a stream of files into variable-size chunks with a buzhash rolling hash, and computes each file's hash. For backups it leaves the chunk hash to the receiver (`deferHashing`). |
 | `ChunkOperator` (`chunkoperator.go`) | A pool of `threads` goroutines that upload, download, find, fossilize, resurrect and delete chunks. Retries failed transfers (2, 8 and 30 seconds). Also `sequenceDownloader`, which fetches the chunks of one metadata sequence in parallel and returns them in order. |
 | `ChunkDownloader` (`chunkdownloader.go`) | Restore-side wrapper around `ChunkOperator`: keeps the list of chunks the restore will need and prefetches ahead of the file being written. |
 | `Entry` (`entry.go`) | One file, directory or link: path, size, times, mode, ownership, extended attributes, and the range of chunks holding its content. Also `ListEntries`, the directory walker with include/exclude patterns. |
-| `EntryList` (`entrylist.go`) | The list of entries of a backup in progress, spilled to a file in the cache when large. Saved as an *incomplete snapshot* when a backup is interrupted, so the next backup can resume. |
+| `EntryList` (`entrylist.go`) | The list of entries of a backup in progress, spilled to a file in the cache past `-max-in-memory-entries` entries or about 128 MiB. Saved as an *incomplete snapshot* when a backup is interrupted, so the next backup can resume. |
 | `Snapshot` (`snapshot.go`) | One revision: id, revision, times, tag, and the chunk sequences that hold its file list, chunk hashes and chunk lengths. |
 | `BackupManager` (`backupmanager.go`) | `Backup`, `Restore`, `CopySnapshots` and `UploadSnapshot`. |
 | `SnapshotManager` (`snapshotmanager.go`) | Everything that reads snapshots: `list`, `check`, `cat`, `diff`, `history`, `prune`, and the snapshot cache. |
@@ -43,8 +43,9 @@ Logging goes through `LOG_DEBUG` … `LOG_ERROR` (`log.go`). `LOG_ERROR` panics;
    marked modified. In hash mode (the first backup, or `-hash`) an interrupted backup saves an incomplete snapshot,
    which the next hash-mode backup reuses if all its chunks still exist.
 3. Feed the modified files, one after another, to the `ChunkMaker`. Files of 1 MiB or more are read and hashed on a
-   read-ahead goroutine. Each chunk that isn't in the chunk cache goes to the `ChunkOperator`, whose workers
-   compress, encrypt, check whether the chunk already exists on the storage and upload it if not.
+   read-ahead goroutine. Every chunk goes to the `ChunkOperator` unhashed; a worker computes its hash and id, skips
+   it if it is in the chunk cache (`UploadFilter`, under a lock), and otherwise checks whether it already exists on
+   the storage, compresses, encrypts and uploads it.
 4. Encode the entry list and the chunk hash and length lists into metadata chunks (`UploadSnapshot`), upload those,
    and finally upload the snapshot file `snapshots/<id>/<revision>`. The revision exists only once that file does,
    so an interrupted backup leaves at most unreferenced chunks.
@@ -59,7 +60,8 @@ once; identical chunks have identical ids, so they are stored once.
    local file is read at the chunk boundaries of the backup, so that chunks already present locally are kept;
    only the other chunks are downloaded.
 3. The `ChunkDownloader` downloads the needed chunks with `threads` workers, prefetching chunks of upcoming files,
-   while one goroutine writes the files in order. The CLI restores in place: changed files are updated where they
+   while one goroutine writes the files in order and 8 more set their permissions, times and extended attributes.
+   The CLI restores in place: changed files are updated where they
    are, and every restored file is checked against its file hash.
 4. Paths are validated and symbolic links are never followed inside the restore tree; see
    [SECURITY_MODEL.md](SECURITY_MODEL.md).
@@ -102,20 +104,24 @@ Everything lives under `.duplicacy/` in the repository (or the directory given b
 ## Concurrency model
 
 - **One goroutine** walks the file system and runs the chunker; with read-ahead, a second goroutine reads and
-  hashes large files.
+  computes the file hash of large files. Chunk hashes are computed by the upload workers.
 - **`threads` workers** in each `ChunkOperator` do all storage I/O. Chunks travel between goroutines as pooled
   `*Chunk` values: whoever holds a chunk passes it on or returns it with `PutChunk` exactly once.
 - Metadata sequences are fetched with a small parallel window (`sequenceDownloader`) because they are read in
   order.
 - Storage backends must be safe for concurrent use by different thread indexes; the `threadIndex` argument lets a
-  backend keep one connection per thread.
+  backend keep one client per thread. Such backends (B2, Dropbox, S3C, Google Drive) implement
+  `threadLimitedStorage` and can only be used with as many threads as they were created with; code that picks its
+  own number of threads (the metadata downloads) caps it with `usableThreads`.
 - `-memory-limit` sets the Go runtime's soft memory limit for large repositories.
 
 ## Where to make changes
 
 - **A new backend**: implement `Storage` in `src/duplicacy_<name>storage.go`, embed `StorageBase`, call
   `SetDefaultNestingLevels`, add the URL scheme to `CreateStorage`, and document it in
-  [storage-backends.md](storage-backends.md).
+  [storage-backends.md](storage-backends.md). Prefer one client that is safe for concurrent use; implement
+  `threadLimitedStorage` if the backend keeps per-thread state. Add a fake or emulator to
+  `loadFakeCloudStorage` so the storage tests can run against it.
 - **A new command or flag**: edit `newApp` in `duplicacy/duplicacy_main.go`, then regenerate
   [COMMANDS.md](COMMANDS.md).
 - **Anything touching the storage format**: read the compatibility rules in [AGENTS.md](../AGENTS.md) first; the

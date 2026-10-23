@@ -47,8 +47,10 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 ```
 
 The `-args` flags for storage tests are `-erasure-coding`, `-separate-metadata`, `-rsa` and
-`-fixed-chunk-size`. Tests use a local file storage under the system temp directory unless `-storage <name>` and
-a git-ignored `src/test_storage.conf` are provided.
+`-fixed-chunk-size`. Tests use a local file storage under the system temp directory unless `-storage <name>` is
+given: `fake-s3`, `fake-gcs` and `fake-gcd` use in-process fakes, `azurite` an Azurite emulator (see
+`docs/TESTING.md`), and other names a git-ignored `src/test_storage.conf`. Changes to a cloud backend must pass
+against its fake.
 
 After changing a command or option, regenerate `docs/COMMANDS.md` (a test fails otherwise):
 `DUPLICACY_UPDATE_DOCS=1 go test -run TestCommandReference ./duplicacy`. New storage backends and credential keys

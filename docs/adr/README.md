@@ -11,5 +11,6 @@ or a change in direction.
 | [0003](0003-separate-metadata-compatibility.md) | Keep the separate metadata directory, keyed by directory | Accepted |
 | [0004](0004-lz4-library.md) | Encode and decode LZ4 with pierrec/lz4, keeping the go-lz4 framing | Accepted |
 | [0005](0005-wrong-highwayhash-in-pure-go.md) | Reimplement the incorrect arm64 HighwayHash in pure Go | Accepted |
+| [0006](0006-cloud-sdks.md) | Current cloud SDKs, chosen for size, and fakes to test them | Accepted |
 
 Template: Context (what forces the decision), Decision, Consequences (including what would make us revisit it).

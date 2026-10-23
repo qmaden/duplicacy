@@ -51,8 +51,8 @@ Prompts for secrets don't echo what you type; prompts for ids and file paths do.
 | SFTP (legacy algorithms) | `sftpc://user@host[:port]/path` | Also allows arcfour, 3des-cbc and diffie-hellman-group1-sha1 for old servers; prints a warning. |
 | SMB | `smb://user@host[:port]/share/path` | Strongly consistent. |
 | Amazon S3 | `s3://region@amazon.com/bucket/path` | `amazon` or `amazon.com` selects AWS; eventually consistent handling. |
-| S3-compatible | `s3://region@endpoint/bucket/path` | Any S3 API endpoint over HTTPS. |
-| S3 (goamz client) | `s3c://region@endpoint/bucket/path` | Alternative S3 client for endpoints the AWS SDK doesn't work with. |
+| S3-compatible | `s3://region@endpoint/bucket/path` | Any S3 API endpoint over HTTPS. Without `region@`, requests are signed for `us-east-1`. |
+| S3 (goamz client) | `s3c://region@endpoint/bucket/path` | Alternative S3 client for endpoints `aws-sdk-go-v2` doesn't work with. |
 | MinIO | `minio://region@host[:port]/bucket/path` (HTTP), `minios://…` (HTTPS) | Path-style requests. `minio://` is unencrypted on the network. |
 | Wasabi | `wasabi://region@s3.wasabisys.com/bucket/path` | S3 with Wasabi-specific renames. Strongly consistent. |
 | Backblaze B2 | `b2://bucket[/path]` | Strongly consistent. |
@@ -85,9 +85,11 @@ Prompts for secrets don't echo what you type; prompts for ids and file paths do.
 
 - Chunk uploads that fail are retried up to three times (after 2, 8 and 30 seconds) before the backup stops;
   downloads of existing chunks are retried the same way.
-- The backends with their own HTTP client (B2, OneDrive, WebDAV, File Fabric, Wasabi renames) keep enough idle
-  connections for every thread to reuse one, and give up on stalled connections (30 s to connect or complete the
-  TLS handshake, 5 minutes for a response to start).
+- S3, Google Cloud Storage, Azure, B2, OneDrive, WebDAV, File Fabric and Wasabi renames share one HTTP client per
+  storage that keeps enough idle connections for every thread to reuse one, and gives up on stalled connections
+  (30 s to connect or complete the TLS handshake, 5 minutes for a response to start).
+- S3 requests carry checksums only where the API requires them, as before the move to `aws-sdk-go-v2`; services
+  that reject the newer default checksums keep working.
 - Rate limits: `-limit-rate <kB/s>` on backup and restore, `-upload-limit-rate` and `-download-limit-rate` on copy.
 
 ## Separate metadata directory
