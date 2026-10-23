@@ -389,8 +389,19 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 				}
 			}
 
-			keyFile = GetPassword(preference, "ssh_key_file", "Enter the path of the private key file:",
-				true, resetPassword)
+			if len(signers) > 0 && keyFile == "" {
+				// The agent has keys; only use a key file that was set up before instead of asking for one
+				// (upstream #687)
+				keyFileKey := "ssh_key_file"
+				if preference.Name != "default" {
+					keyFileKey = preference.Name + "_" + keyFileKey
+				}
+				keyFile = keyringGet(keyFileKey)
+			} else {
+				keyFile = GetPassword(preference, "ssh_key_file",
+					"Enter the path of the SSH private key file for logging in to the server (not the RSA encryption key):",
+					true, resetPassword)
+			}
 
 			var keySigner ssh.Signer
 			var err error
@@ -407,7 +418,8 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 					if err != nil {
 						if _, ok := err.(*ssh.PassphraseMissingError); ok {
 							LOG_TRACE("SSH_PUBLICKEY", "The private key file is encrypted")
-							passphrase = GetPassword(preference, "ssh_passphrase", "Enter the passphrase to decrypt the private key file:", false, resetPassword)
+							passphrase = GetPassword(preference, "ssh_passphrase",
+								fmt.Sprintf("Enter the passphrase of the SSH private key file %s:", keyFile), false, resetPassword)
 							if len(passphrase) == 0 {
 								LOG_INFO("SSH_PUBLICKEY", "No passphrase to descrypt the private key file %s", keyFile)
 							} else {
@@ -467,7 +479,9 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		keyFileAuthMethods := []ssh.AuthMethod{
 			ssh.PublicKeysCallback(publicKeysCallback),
 		}
-		if keyFile != "" {
+		// Public keys come first when a key file is set up or an SSH agent is running, so that a password is only
+		// asked for if they don't work
+		if keyFile != "" || os.Getenv("SSH_AUTH_SOCK") != "" {
 			authMethods = append(keyFileAuthMethods, passwordAuthMethods...)
 		} else {
 			authMethods = append(passwordAuthMethods, keyFileAuthMethods...)

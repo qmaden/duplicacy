@@ -5,6 +5,7 @@
 package duplicacy
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 func newTestHostKey(t *testing.T) ssh.PublicKey {
@@ -161,6 +163,11 @@ func TestSFTPHostKeyAlgorithmPreference(t *testing.T) {
 
 // startTestSFTPServer runs an SSH server with the SFTP subsystem on localhost, using 'hostKey' as its key.
 func startTestSFTPServer(t *testing.T, hostKey ed25519.PrivateKey) int {
+	return startTestSFTPServerWithClientKey(t, hostKey, nil)
+}
+
+// startTestSFTPServerWithClientKey also accepts public key authentication with 'clientKey', if not nil.
+func startTestSFTPServerWithClientKey(t *testing.T, hostKey ed25519.PrivateKey, clientKey ssh.PublicKey) int {
 	signer, err := ssh.NewSignerFromKey(hostKey)
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +179,14 @@ func startTestSFTPServer(t *testing.T, hostKey ed25519.PrivateKey) int {
 			}
 			return nil, fmt.Errorf("access denied")
 		},
+	}
+	if clientKey != nil {
+		config.PublicKeyCallback = func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if conn.User() == "user" && bytes.Equal(key.Marshal(), clientKey.Marshal()) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("unknown key")
+		}
 	}
 	config.AddHostKey(signer)
 
@@ -263,5 +278,54 @@ func TestSFTPHostKeyEndToEnd(t *testing.T) {
 	os.WriteFile(filepath.Join(preferencePath, "known_hosts"), []byte(samePort), 0600)
 	if err := connectTestSFTP(t, otherPort, storageDir); err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Errorf("Connecting to a host with a changed key didn't fail as expected: %v", err)
+	}
+}
+
+// Upstream #687: with an SSH agent running, the private key file and then the password used to be asked for
+// before the agent's keys were tried.
+func TestSFTPUsesAgentWithoutPrompting(t *testing.T) {
+	setupHostKeyTest(t, true)
+	t.Setenv(acceptNewHostKeyVariable, "1")
+	sftpHostKeyPrompt = promptForNewHostKey
+
+	_, clientPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	clientSigner, _ := ssh.NewSignerFromKey(clientPrivate)
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	port := startTestSFTPServerWithClientKey(t, hostKey, clientSigner.PublicKey())
+
+	// An agent holding the client key, on a Unix socket
+	socketDir, err := os.MkdirTemp("", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(socketDir)
+	socket := filepath.Join(socketDir, "agent.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Skipf("Unix sockets are not available: %v", err)
+	}
+	defer listener.Close()
+	keyring := agent.NewKeyring()
+	keyring.Add(agent.AddedKey{PrivateKey: clientPrivate})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go agent.ServeAgent(keyring, conn)
+		}
+	}()
+	t.Setenv("SSH_AUTH_SOCK", socket)
+	t.Setenv("DUPLICACY_SSH_PASSWORD", "")
+
+	storageDir := t.TempDir()
+	preference := Preference{Name: "default", StorageURL: fmt.Sprintf("sftp://user@127.0.0.1:%d/%s", port, storageDir)}
+	if message := expectLogError(func() {
+		if CreateStorage(preference, false, 1) == nil {
+			t.Error("No storage was created")
+		}
+	}); message != "" {
+		t.Errorf("Logging in with the agent's key failed: %s", message)
 	}
 }
