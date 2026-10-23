@@ -1456,6 +1456,27 @@ func main() {
 
 	duplicacy.SetLoggingLevel(duplicacy.INFO)
 
+	app := newApp()
+
+	// If the program is interrupted, call the RunAtError function.
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		for range c {
+			duplicacy.RunAtError()
+			os.Exit(1)
+		}
+	}()
+
+	err := app.Run(os.Args)
+	if err != nil {
+		os.Exit(2)
+	}
+
+}
+
+// newApp defines the commands and options of the CLI; docs/COMMANDS.md is generated from it.
+func newApp() *cli.App {
 	app := cli.NewApp()
 
 	app.Commands = []cli.Command{
@@ -2321,19 +2342,5 @@ func main() {
 		os.Exit(2)
 	}
 
-	// If the program is interrupted, call the RunAtError function.
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	go func() {
-		for range c {
-			duplicacy.RunAtError()
-			os.Exit(1)
-		}
-	}()
-
-	err := app.Run(os.Args)
-	if err != nil {
-		os.Exit(2)
-	}
-
+	return app
 }
