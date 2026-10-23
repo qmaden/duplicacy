@@ -38,10 +38,11 @@ type GCDStorage struct {
 	service     *drive.Service
 	idCache     map[string]string // only directories are saved in this cache
 	idCacheLock sync.Mutex
-	backoffs    []int  // desired backoff time in seconds for each thread
-	attempts    []int  // number of failed attempts since last success for each thread
-	driveID     string // the ID of the shared drive or 'root' (GCDUserDrive) if the user's drive
-	spaces      string // 'appDataFolder' if scope is drive.appdata; 'drive' otherwise
+	backoffs    []int      // desired backoff time in seconds for each thread
+	attempts    []int      // number of failed attempts since last success for each thread
+	backoffLock sync.Mutex // guards backoffs and attempts, since ListFiles lists directories in parallel on one thread index
+	driveID     string     // the ID of the shared drive or 'root' (GCDUserDrive) if the user's drive
+	spaces      string     // 'appDataFolder' if scope is drive.appdata; 'drive' otherwise
 
 	createDirectoryLock sync.Mutex
 	isConnected         bool
@@ -67,8 +68,10 @@ func (storage *GCDStorage) shouldRetry(threadIndex int, err error) (bool, error)
 	retry := false
 	message := ""
 	if err == nil {
+		storage.backoffLock.Lock()
 		storage.backoffs[threadIndex] = 1
 		storage.attempts[threadIndex] = 0
+		storage.backoffLock.Unlock()
 		return false, nil
 	} else if e, ok := err.(*googleapi.Error); ok {
 		if 500 <= e.Code && e.Code < 600 {
@@ -114,11 +117,13 @@ func (storage *GCDStorage) shouldRetry(threadIndex int, err error) (bool, error)
 		return false, err
 	}
 
+	storage.backoffLock.Lock()
 	if storage.attempts[threadIndex] >= MAX_ATTEMPTS {
 		LOG_INFO("GCD_RETRY", "[%d] Maximum number of retries reached (backoff: %d, attempts: %d)",
 			threadIndex, storage.backoffs[threadIndex], storage.attempts[threadIndex])
 		storage.backoffs[threadIndex] = 1
 		storage.attempts[threadIndex] = 0
+		storage.backoffLock.Unlock()
 		return false, err
 	}
 
@@ -132,6 +137,7 @@ func (storage *GCDStorage) shouldRetry(threadIndex int, err error) (bool, error)
 	delay := float64(storage.backoffs[threadIndex]) * rand.Float64() * 2
 	LOG_DEBUG("GCD_RETRY", "[%d] %s; retrying after %.2f seconds (backoff: %d, attempts: %d)",
 		threadIndex, message, delay, storage.backoffs[threadIndex], storage.attempts[threadIndex])
+	storage.backoffLock.Unlock()
 	time.Sleep(time.Duration(delay * float64(time.Second)))
 
 	return true, nil
@@ -580,6 +586,8 @@ func (storage *GCDStorage) ListFiles(threadIndex int, dir string) ([]string, []i
 				go func(parent string) {
 					pathID, ok := storage.findPathID(parent)
 					if !ok {
+						// Every worker must report back, or the loop below waits forever
+						directoryChannel <- ""
 						return
 					}
 					entries, err := storage.listFiles(threadIndex, pathID, true, true)
@@ -605,8 +613,9 @@ func (storage *GCDStorage) ListFiles(threadIndex int, dir string) ([]string, []i
 							files = append(files, name)
 							sizes = append(sizes, entry.Size)
 						} else {
-							directoryChannel <- parent + "/" + entry.Name
+							// Save the id first: the worker listing this directory may start as soon as it's sent
 							storage.savePathID(parent+"/"+entry.Name, entry.Id)
+							directoryChannel <- parent + "/" + entry.Name
 						}
 					}
 					lock.Lock()

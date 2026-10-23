@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
@@ -230,5 +231,35 @@ func TestGCDStorage(t *testing.T) {
 		storage := createFakeGCDStorage(t, server, driveID, "backups/storage", 4)
 		storage.EnableTestMode() // small pages, so that listings need several
 		exerciseCloudStorage(t, storage, 40)
+	}
+}
+
+// ListFiles lists the chunk tree with one goroutine per directory.  A goroutine for a directory missing from the id
+// cache returned without reporting back, so the listing waited forever; prune and check could hang this way.
+func TestGCDListFilesWithUncachedDirectory(t *testing.T) {
+	setTestingT(t)
+	server := newFakeDrive()
+	t.Cleanup(server.Close)
+	storage := createFakeGCDStorage(t, server, "", "uncached", 2)
+	if err := storage.UploadFile(0, "chunks/ab/cdef", []byte("chunk")); err != nil {
+		t.Fatal(err)
+	}
+	storage.deletePathID("fossils")
+
+	done := make(chan error, 1)
+	go func() {
+		files, _, err := storage.ListFiles(0, "chunks")
+		if err == nil && (len(files) != 1 || files[0] != "ab/cdef") {
+			err = fmt.Errorf("listed %v", files)
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Error(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("ListFiles didn't return")
 	}
 }
