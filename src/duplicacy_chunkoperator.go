@@ -50,8 +50,10 @@ type ChunkOperator struct {
 	taskQueue      chan ChunkTask // Operating goroutines are waiting on this channel for input
 	stopChannel    chan bool      // Used to stop all the goroutines
 
-	numberOfActiveTasks int64 // The number of chunks that are being operated on
-	stopped             int32 // Set by the first call to Stop()
+	numberOfActiveTasks int64      // The number of chunks that are being operated on, guarded by taskLock
+	taskLock            sync.Mutex // Guards numberOfActiveTasks
+	tasksDone           *sync.Cond // Signalled when numberOfActiveTasks drops to 0
+	stopped             int32      // Set by the first call to Stop()
 
 	fossils        []string    // For fossilize operation, the paths of the fossils are stored in this slice
 	collectionLock *sync.Mutex // The lock for accessing 'fossils'
@@ -87,6 +89,7 @@ func CreateChunkOperator(config *Config, storage Storage, snapshotCache *FileSto
 		allowFailures:  allowFailures,
 		rewriteChunks:  rewriteChunks,
 	}
+	operator.tasksDone = sync.NewCond(&operator.taskLock)
 
 	// Start the operator goroutines
 	for i := 0; i < operator.threads; i++ {
@@ -112,20 +115,20 @@ func (operator *ChunkOperator) Stop() {
 		return
 	}
 
-	for atomic.LoadInt64(&operator.numberOfActiveTasks) > 0 {
-		time.Sleep(100 * time.Millisecond)
-	}
+	operator.WaitForCompletion()
 	for i := 0; i < operator.threads; i++ {
 		operator.stopChannel <- false
 	}
 
 }
 
+// WaitForCompletion returns once every task added so far has finished.
 func (operator *ChunkOperator) WaitForCompletion() {
-
-	for atomic.LoadInt64(&operator.numberOfActiveTasks) > 0 {
-		time.Sleep(100 * time.Millisecond)
+	operator.taskLock.Lock()
+	for operator.numberOfActiveTasks > 0 {
+		operator.tasksDone.Wait()
 	}
+	operator.taskLock.Unlock()
 }
 
 func (operator *ChunkOperator) AddTask(operation int, chunkID string, chunkHash string, filePath string, chunkIndex int, chunk *Chunk, isMetadata bool, skipCache bool, completionFunc func(*Chunk, int)) {
@@ -144,7 +147,9 @@ func (operator *ChunkOperator) AddTask(operation int, chunkID string, chunkHash 
 
 	// Count the task before a worker can pick it up and finish it, so the count never drops below the number of
 	// tasks still pending and WaitForCompletion can't return early
-	atomic.AddInt64(&operator.numberOfActiveTasks, int64(1))
+	operator.taskLock.Lock()
+	operator.numberOfActiveTasks++
+	operator.taskLock.Unlock()
 	operator.taskQueue <- task
 
 	return
@@ -201,7 +206,12 @@ func (operator *ChunkOperator) Resurrect(chunkID string, filePath string) {
 
 func (operator *ChunkOperator) Run(threadIndex int, task ChunkTask) {
 	defer func() {
-		atomic.AddInt64(&operator.numberOfActiveTasks, int64(-1))
+		operator.taskLock.Lock()
+		operator.numberOfActiveTasks--
+		if operator.numberOfActiveTasks == 0 {
+			operator.tasksDone.Broadcast()
+		}
+		operator.taskLock.Unlock()
 	}()
 
 	if task.operation == ChunkOperationDownload {
