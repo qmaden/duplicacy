@@ -959,6 +959,16 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 
 	chunkDownloader.AddFiles(remoteSnapshot, fileEntries)
 
+	// Every chunk of a file that doesn't exist yet must be downloaded; knowing this up front lets the downloader
+	// prefetch them before the file's turn comes
+	for _, file := range fileEntries {
+		if file.Size > 0 {
+			if _, err := os.Lstat(joinPath(top, file.Path)); os.IsNotExist(err) {
+				chunkDownloader.MarkNeeded(file)
+			}
+		}
+	}
+
 	chunkMaker := CreateFileChunkMaker(manager.config, true)
 
 	startDownloadingTime := time.Now().Unix()

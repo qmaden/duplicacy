@@ -44,6 +44,7 @@ type ChunkDownloader struct {
 	numberOfDownloadedChunks  int   // The number of chunks that have been downloaded
 	numberOfDownloadingChunks int   // The number of chunks still being downloaded
 	numberOfActiveChunks      int   // The number of chunks that is being downloaded or has been downloaded but not reclaimed
+	prefetchCursor            int   // Chunks before this index have already been considered for prefetching
 }
 
 func CreateChunkDownloader(operator *ChunkOperator) *ChunkDownloader {
@@ -95,6 +96,14 @@ func (downloader *ChunkDownloader) AddFiles(snapshot *Snapshot, files []*Entry) 
 		}
 	}
 	atomic.StoreInt64(&downloader.operator.totalChunkSize, downloader.totalChunkSize)
+}
+
+// MarkNeeded marks every chunk of 'file' as needed, for a file that doesn't exist locally and therefore can't
+// provide any chunk itself.
+func (downloader *ChunkDownloader) MarkNeeded(file *Entry) {
+	for i := file.StartChunk; i <= file.EndChunk; i++ {
+		downloader.taskList[i].needed = true
+	}
 }
 
 // Prefetch adds up to 'threads' chunks needed by a file to the download list
@@ -183,14 +192,21 @@ func (downloader *ChunkDownloader) WaitForChunk(chunkIndex int) (chunk *Chunk) {
 		downloader.numberOfActiveChunks++
 	}
 
-	// We also need to look ahead and prefetch other chunks as many as permitted by the number of threads
-	for i := chunkIndex + 1; i < len(downloader.taskList); i++ {
+	// We also need to look ahead and prefetch other chunks as many as permitted by the number of threads.  Chunks
+	// not (yet) known to be needed are skipped rather than ending the look-ahead, so that downloads continue across
+	// files (upstream #541); the cursor keeps the scan from starting over for every chunk.
+	start := chunkIndex + 1
+	if downloader.prefetchCursor > start {
+		start = downloader.prefetchCursor
+	}
+	for i := start; i < len(downloader.taskList); i++ {
 		if downloader.numberOfActiveChunks >= downloader.operator.threads {
 			break
 		}
+		downloader.prefetchCursor = i + 1
 		task := &downloader.taskList[i]
 		if !task.needed {
-			break
+			continue
 		}
 
 		if !task.isDownloading {
