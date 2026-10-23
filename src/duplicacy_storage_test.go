@@ -41,6 +41,11 @@ func loadStorage(localStoragePath string, threads int) (Storage, error) {
 		return storage, err
 	}
 
+	// In-process fakes of cloud services; one server per process, shared like a real remote storage
+	if storage, err := loadFakeCloudStorage(threads); storage != nil || err != nil {
+		return storage, err
+	}
+
 	description, err := os.ReadFile("test_storage.conf")
 	if err != nil {
 		return nil, err

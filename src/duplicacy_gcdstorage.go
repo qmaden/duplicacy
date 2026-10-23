@@ -5,6 +5,7 @@
 package duplicacy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
@@ -416,7 +416,14 @@ func CreateGCDStorage(tokenFile string, driveID string, storagePath string, thre
 		tokenSource = config.TokenSource(ctx, &gcdConfig.Token)
 	}
 
-	service, err := drive.NewService(ctx, option.WithTokenSource(tokenSource))
+	return createGCDStorage(driveID, storagePath, threads, isServiceAccount, scope, option.WithTokenSource(tokenSource))
+}
+
+// createGCDStorage creates a GCD storage object using a client with the given options.
+func createGCDStorage(driveID string, storagePath string, threads int, isServiceAccount bool, scope string,
+	options ...option.ClientOption) (storage *GCDStorage, err error) {
+
+	service, err := drive.NewService(context.Background(), options...)
 	if err != nil {
 		return nil, err
 	}

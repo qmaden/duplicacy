@@ -5,28 +5,32 @@
 package duplicacy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"time"
 
-	gcs "cloud.google.com/go/storage"
-	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
-	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	gcs "google.golang.org/api/storage/v1"
 )
+
+// The backend uses the generated client for the Cloud Storage JSON API.  cloud.google.com/go/storage would add
+// gRPC, OpenTelemetry and Cloud Monitoring to the binary (about 19 MB) for the same six HTTP calls.
 
 type GCSStorage struct {
 	StorageBase
 
-	bucket     *gcs.BucketHandle
+	service    *gcs.Service
+	bucket     string
 	storageDir string
 
 	numberOfThreads int
@@ -67,7 +71,7 @@ func CreateGCSStorage(tokenFile string, bucketName string, storageDir string, th
 	var tokenSource oauth2.TokenSource
 
 	if isServiceAccount {
-		config, err := google.JWTConfigFromJSON(description, gcs.ScopeReadWrite)
+		config, err := google.JWTConfigFromJSON(description, gcs.DevstorageReadWriteScope)
 		if err != nil {
 			return nil, err
 		}
@@ -86,17 +90,25 @@ func CreateGCSStorage(tokenFile string, bucketName string, storageDir string, th
 		tokenSource = config.TokenSource(ctx, &gcsConfig.Token)
 	}
 
-	options := option.WithTokenSource(tokenSource)
-	client, err := gcs.NewClient(ctx, options)
+	httpClient := newHTTPClient(threads)
+	httpClient.Transport = &oauth2.Transport{Source: tokenSource, Base: httpClient.Transport}
+	return createGCSStorage(bucketName, storageDir, threads, option.WithHTTPClient(httpClient))
+}
 
-	bucket := client.Bucket(bucketName)
+// createGCSStorage creates a GCS storage object using a client with the given options.
+func createGCSStorage(bucketName string, storageDir string, threads int, options ...option.ClientOption) (storage *GCSStorage, err error) {
+	service, err := gcs.NewService(context.Background(), options...)
+	if err != nil {
+		return nil, err
+	}
 
 	if len(storageDir) > 0 && storageDir[len(storageDir)-1] != '/' {
 		storageDir += "/"
 	}
 
 	storage = &GCSStorage{
-		bucket:          bucket,
+		service:         service,
+		bucket:          bucketName,
 		storageDir:      storageDir,
 		numberOfThreads: threads,
 	}
@@ -104,6 +116,25 @@ func CreateGCSStorage(tokenFile string, bucketName string, storageDir string, th
 	storage.DerivedStorage = storage
 	storage.SetDefaultNestingLevels([]int{0}, 0)
 	return storage, nil
+}
+
+// isGCSNotFound returns true if the error is a 404 response.
+func isGCSNotFound(err error) bool {
+	e, ok := err.(*googleapi.Error)
+	return ok && e.Code == 404
+}
+
+// retry calls 'operation' until it succeeds or fails with an error that shouldn't be retried.
+func (storage *GCSStorage) retry(operation func() error) error {
+	backoff := 1
+	for {
+		err := operation()
+		if retry, e := storage.shouldRetry(&backoff, err); e == nil && !retry {
+			return nil
+		} else if !retry {
+			return e
+		}
+	}
 }
 
 func (storage *GCSStorage) shouldRetry(backoff *int, err error) (bool, error) {
@@ -155,40 +186,36 @@ func (storage *GCSStorage) ListFiles(threadIndex int, dir string) ([]string, []i
 		dir = dir[:len(dir)-1]
 	}
 
-	query := gcs.Query{
-		Prefix: storage.storageDir + dir + "/",
-	}
-	dirOnly := false
-	prefixLength := len(query.Prefix)
+	prefix := storage.storageDir + dir + "/"
+	// Only the 'snapshots' directory is listed by subdirectory; everywhere else all files below 'dir' are listed
+	dirOnly := dir == "snapshots"
 
-	if dir == "snapshots" {
-		query.Delimiter = "/"
-		dirOnly = true
-	}
-
-	files := []string{}
-	sizes := []int64{}
-	iter := storage.bucket.Objects(context.Background(), &query)
-	for {
-		attributes, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-
+	var files []string
+	var sizes []int64
+	err := storage.retry(func() error {
+		files = []string{}
+		sizes = []int64{}
+		call := storage.service.Objects.List(storage.bucket).Prefix(prefix).
+			Fields("nextPageToken", "prefixes", "items(name,size)")
 		if dirOnly {
-			if len(attributes.Prefix) != 0 {
-				prefix := attributes.Prefix
-				files = append(files, prefix[prefixLength:])
-			}
-		} else {
-			if len(attributes.Prefix) == 0 {
-				files = append(files, attributes.Name[prefixLength:])
-				sizes = append(sizes, attributes.Size)
-			}
+			call = call.Delimiter("/")
 		}
+		return call.Pages(context.Background(), func(objects *gcs.Objects) error {
+			if dirOnly {
+				for _, subDir := range objects.Prefixes {
+					files = append(files, subDir[len(prefix):])
+				}
+				return nil
+			}
+			for _, object := range objects.Items {
+				files = append(files, object.Name[len(prefix):])
+				sizes = append(sizes, int64(object.Size))
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 
 	return files, sizes, nil
@@ -196,20 +223,32 @@ func (storage *GCSStorage) ListFiles(threadIndex int, dir string) ([]string, []i
 
 // DeleteFile deletes the file or directory at 'filePath'.
 func (storage *GCSStorage) DeleteFile(threadIndex int, filePath string) (err error) {
-	err = storage.bucket.Object(storage.storageDir + filePath).Delete(context.Background())
-	if err == gcs.ErrObjectNotExist {
-		return nil
-	}
-	return err
+	return storage.retry(func() error {
+		err := storage.service.Objects.Delete(storage.bucket, storage.storageDir+filePath).Do()
+		if isGCSNotFound(err) {
+			return nil
+		}
+		return err
+	})
 }
 
 // MoveFile renames the file.
 func (storage *GCSStorage) MoveFile(threadIndex int, from string, to string) (err error) {
-
-	source := storage.bucket.Object(storage.storageDir + from)
-	destination := storage.bucket.Object(storage.storageDir + to)
-
-	_, err = destination.CopierFrom(source).Run(context.Background())
+	err = storage.retry(func() error {
+		call := storage.service.Objects.Rewrite(storage.bucket, storage.storageDir+from, storage.bucket,
+			storage.storageDir+to, &gcs.Object{}).Fields("done", "rewriteToken")
+		// Large objects may take several calls; each continues where the last one stopped
+		for {
+			response, err := call.Do()
+			if err != nil {
+				return err
+			}
+			if response.Done {
+				return nil
+			}
+			call = call.RewriteToken(response.RewriteToken)
+		}
+	})
 	if err != nil {
 		return err
 	}
@@ -224,52 +263,46 @@ func (storage *GCSStorage) CreateDirectory(threadIndex int, dir string) (err err
 
 // GetFileInfo returns the information about the file or directory at 'filePath'.
 func (storage *GCSStorage) GetFileInfo(threadIndex int, filePath string) (exist bool, isDir bool, size int64, err error) {
-	object := storage.bucket.Object(storage.storageDir + filePath)
-
-	attributes, err := object.Attrs(context.Background())
-
-	if err != nil {
-		if err == gcs.ErrObjectNotExist {
-			return false, false, 0, nil
-		} else {
-			return false, false, 0, err
+	err = storage.retry(func() error {
+		object, err := storage.service.Objects.Get(storage.bucket, storage.storageDir+filePath).Fields("size").Do()
+		if isGCSNotFound(err) {
+			exist = false
+			return nil
+		} else if err != nil {
+			return err
 		}
+		exist, size = true, int64(object.Size)
+		return nil
+	})
+	if err != nil {
+		return false, false, 0, err
 	}
-
-	return true, false, attributes.Size, nil
+	return exist, false, size, nil
 }
 
 // DownloadFile reads the file at 'filePath' into the chunk.
 func (storage *GCSStorage) DownloadFile(threadIndex int, filePath string, chunk *Chunk) (err error) {
-	readCloser, err := storage.bucket.Object(storage.storageDir + filePath).NewReader(context.Background())
+	var response *http.Response
+	err = storage.retry(func() (err error) {
+		response, err = storage.service.Objects.Get(storage.bucket, storage.storageDir+filePath).Download()
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	defer readCloser.Close()
-	_, err = RateLimitedCopy(chunk, readCloser, storage.DownloadRateLimit/storage.numberOfThreads)
+	defer response.Body.Close()
+	_, err = RateLimitedCopy(chunk, response.Body, storage.DownloadRateLimit/storage.numberOfThreads)
 	return err
 }
 
 // UploadFile writes 'content' to the file at 'filePath'.
 func (storage *GCSStorage) UploadFile(threadIndex int, filePath string, content []byte) (err error) {
-
-	backoff := 1
-	for {
-		writeCloser := storage.bucket.Object(storage.storageDir + filePath).NewWriter(context.Background())
-		defer writeCloser.Close()
+	return storage.retry(func() error {
 		reader := CreateRateLimitedReader(content, storage.UploadRateLimit/storage.numberOfThreads)
-		_, err = io.Copy(writeCloser, reader)
-
-		if retry, e := storage.shouldRetry(&backoff, err); e == nil && !retry {
-			break
-		} else if retry {
-			continue
-		} else {
-			return err
-		}
-	}
-
-	return err
+		_, err := storage.service.Objects.Insert(storage.bucket, &gcs.Object{Name: storage.storageDir + filePath}).
+			Media(reader, googleapi.ContentType("application/octet-stream")).Fields("name").Do()
+		return err
+	})
 }
 
 // If a local snapshot cache is needed for the storage to avoid downloading/uploading chunks too often when
