@@ -7,7 +7,7 @@ toolchain go1.26.10
 require (
 	cloud.google.com/go v0.38.0
 	github.com/aryann/difflib v0.0.0-20170710044230-e206f873d14a
-	github.com/aws/aws-sdk-go v1.30.7
+	github.com/aws/aws-sdk-go v1.55.8
 	github.com/bkaradzic/go-lz4 v1.0.0
 	github.com/cloudsoda/go-smb2 v0.0.0-20260918041005-0c5d69b69701
 	github.com/gilbertchen/azure-sdk-for-go v14.1.2-0.20180323033227-8fd4663cab7c+incompatible
@@ -18,7 +18,7 @@ require (
 	github.com/gilbertchen/gopass v0.0.0-20170109162249-bf9dde6d0d2c
 	github.com/gilbertchen/keyring v0.0.0-20221004152639-1661cbebc508
 	github.com/gilbertchen/xattr v0.0.0-20160926155429-68e7a6806b01
-	github.com/klauspost/compress v1.16.3
+	github.com/klauspost/compress v1.20.3
 	github.com/klauspost/reedsolomon v1.9.9
 	github.com/minio/highwayhash v1.0.2
 	github.com/ncw/swift/v2 v2.0.1
@@ -46,7 +46,7 @@ require (
 	github.com/godbus/dbus v4.1.0+incompatible // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
-	github.com/golang/protobuf v1.5.0 // indirect
+	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/googleapis/gax-go/v2 v2.0.5 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
@@ -55,7 +55,7 @@ require (
 	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
 	github.com/jcmturner/gokrb5/v8 v8.4.4 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
-	github.com/jmespath/go-jmespath v0.3.0 // indirect
+	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/jtolio/eventkit v0.0.0-20221004135224-074cf276595b // indirect
 	github.com/jtolio/noiseconn v0.0.0-20230111204749-d7ec1a08b0b8 // indirect
 	github.com/klauspost/cpuid v1.3.1 // indirect
@@ -80,7 +80,7 @@ require (
 	google.golang.org/appengine v1.6.5 // indirect
 	google.golang.org/genproto v0.0.0-20200409111301-baae70f3302d // indirect
 	google.golang.org/grpc v1.28.1 // indirect
-	google.golang.org/protobuf v1.28.1 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	storj.io/common v0.0.0-20230920095429-0ce0a575e6f8 // indirect
 	storj.io/drpc v0.0.33 // indirect
 	storj.io/picobuf v0.0.2-0.20230906122608-c4ba17033c6c // indirect
