@@ -26,7 +26,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	blake2 "github.com/minio/blake2b-simd"
+	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -334,7 +334,8 @@ func (config *Config) NewKeyedHasher(key []byte) hash.Hash {
 	// only zlib compression was supported.  Later SHA256 was replaced by Blake2b and LZ4 was used
 	// for compression (with compression level set to 100).
 	if config.CompressionLevel >= DEFAULT_COMPRESSION_LEVEL {
-		hasher, err := blake2.New(&blake2.Config{Size: 32, Key: key})
+		// Keyed BLAKE2b-256, identical to what github.com/minio/blake2b-simd computed
+		hasher, err := blake2b.New256(key)
 		if err != nil {
 			LOG_ERROR("HASH_KEY", "Invalid hash key: %x", key)
 		}
@@ -379,7 +380,7 @@ func (config *Config) NewFileHasher() hash.Hash {
 	if SkipFileHash {
 		return &DummyHasher{}
 	} else if config.CompressionLevel >= DEFAULT_COMPRESSION_LEVEL {
-		hasher, _ := blake2.New(&blake2.Config{Size: 32})
+		hasher, _ := blake2b.New256(nil)
 		return hasher
 	} else {
 		return sha256.New()
