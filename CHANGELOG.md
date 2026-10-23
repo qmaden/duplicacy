@@ -55,7 +55,8 @@ All notable changes to this fork are listed here. The format follows
   codecs, chunk buffers sized from the average chunk size, single-write local chunk uploads (upstream #670), large
   files read ahead and hashed on a second core, metadata chunks downloaded in parallel, and restore prefetching
   across files (upstream #541). Extended attributes are read when each entry is stored instead of being kept for
-  the whole backup (backing up 200,000 files on macOS: peak memory 743 MB to 198 MB).
+  the whole backup (backing up 200,000 files on macOS: peak memory 743 MB to 198 MB). Waiting for chunk
+  operations no longer polls every 100 ms, which made prune with many chunks much slower than needed.
 - B2, OneDrive, WebDAV, File Fabric and Wasabi reuse one connection per thread and time out stalled connections
   (30 s to connect, 5 minutes for a response to start) instead of hanging (upstream #644, #480).
 - SFTP tries keys from a running ssh-agent before asking for a password or a key file (upstream #687); the SSH key

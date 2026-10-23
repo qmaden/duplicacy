@@ -3,9 +3,10 @@
 Repository: https://github.com/qmaden/duplicacy (HEAD `5debf42`, 833 commits, about 26k lines of Go)
 Reviewed: 2026-10-22
 
-## Implementation status (updated 2026-10-22)
+## Implementation status (updated 2026-10-23)
 
-**Phases 0, 1, 2 and 3 are implemented** on branch `go-1.27-wronghighwayhash`, one commit per item. Every fix has a
+**Phases 0 to 5 and the documentation plan (section 8) are implemented** on branch `go-1.27-wronghighwayhash`,
+one commit per item, except for the items deferred below. Every fix has a
 regression test that fails without it, where one was practical. The full suite passes with the race detector.
 
 | Phase | Item | Commit |
@@ -35,6 +36,42 @@ regression test that fails without it, where one was practical. The full suite p
 | 3 | B10 task counting/Stop, B11 copy race and statistics, restore progress; first copy test | `c2e8319` |
 | 3 | B16 rewrite never leaves a chunk only as a fossil | `5f20dd7` |
 | 3 | N6 restore over changed file types (#429), delete-mode fix, N8 partial-restore parents (#84) | `da52611` |
+| 4 | C1 LZ4 via pierrec/lz4 (same framing), C2 pooled zstd codecs; benchmarks | `5af389b` |
+| 4 | M1 chunk buffers from the average size, I1 single-write local uploads (#670) | `0f28694` |
+| 4 | C3a read-ahead and file hash on a second goroutine | `4181c79` |
+| 4 | I3 (part) restore prefetch across files (#541, PR #542) | `7191fd3` |
+| 4 | W1 HTTP client with per-thread idle connections and timeouts (#644, #480) | `cc76808` |
+| 4 | N10 / W3 chunk upload and download retries (2, 8, 30 s) (#683) | `94e121f` |
+| 4 | P3 parallel metadata downloads (sequence downloader) | `83ae8f0` |
+| 4 | M2 extended attributes read when entries are stored | `b994114` |
+| 4 | M5 `-memory-limit` (#340) | `4b2479b` |
+| 4 | P7 condition variable instead of 100 ms polling in the chunk operator | `8fdc5f7` |
+| 5 | C4 x/crypto/blake2b (26 recorded vectors) | `bce472a` |
+| 5 | klauspost/compress 1.20.3, aws-sdk-go 1.55.8, protobuf 1.36.12 | `386c43a` |
+| 5 | io/ioutil replaced, dead code removed, staticcheck U1000 in CI | `5f14e31` |
+| 5 | SFTP: ssh-agent keys first (#687), clearer key prompts (#695) | `35ae146` |
+| docs | Generated command reference (`docs/COMMANDS.md`, checked by a test) | `5d23218` |
+| docs | `docs/storage-backends.md` | `de037db` |
+| docs | `docs/ARCHITECTURE.md`, `docs/PRUNE_SAFETY.md`, `docs/adr/` (5 ADRs) | `2818166` |
+| docs | README rewritten for the fork; DESIGN.md and GUIDE.md point to the in-repo docs | `a7fd7f7` |
+| docs | CHANGELOG, UPGRADING and TESTING updated for phases 4 and 5 | `e49e36d` |
+
+**Phase 4 measurements** (1.1 GB, 20,000 files, encrypted LZ4, local storage, `-threads 4`, Apple M-series):
+
+| Change | Result |
+|--------|--------|
+| C1 + C2 (micro) | LZ4 encrypt 274 → 381 MB/s, decrypt 370 → 533 MB/s; allocation per chunk 4.8 MB → 79 KB (LZ4), 20.5 MB → 0.2 MB (zstd) |
+| C1 + C2 + M1 + I1 | Backup CPU 10.0–10.4 s → 8.4 s, peak RSS 429–451 MB → 307–328 MB; restore wall 6.03 → 5.56 s, CPU 8.61 → 7.41 s |
+| C3a | Backup wall 6.92 → 5.38 s (−22%) at the same CPU time |
+| Restore prefetch + P3 | 200 small files, 50 ms per download, 8 threads: 5.6 s → 3.6 s → 2.2 s |
+| W1 | 160 requests from 8 threads: 8 connections instead of 46 |
+| M2 | 200,000 small files on macOS: peak RSS 743 → 198 MB, CPU 16.8 → 14.4 s |
+| M5 | Same tree with `-memory-limit 100`: 197 → 130 MB for about 10% more CPU |
+| P7 | `TestPruneMultipleThread` 79.3 → 4.5 s |
+
+Against the section 9.5 targets: backup is 1.3–1.6× faster in wall time than the 7.1–8.7 s baseline (target 1.5×)
+and peak RSS is about 65–75% of baseline (target 60%); C3b and M4 address the rest. Restore of many small files from a local storage is
+still bound by per-file syscalls (the I3 worker pool is deferred).
 
 **New findings while implementing:**
 
@@ -65,8 +102,24 @@ More findings from Phase 3:
 - N7 (a read error in the middle of a file aborts the backup, upstream #309): skipping the file would leave its
   partial data in the chunk stream and shift the offsets of every following file; it needs support for gaps in the
   entry list. Errors on the first read are rare on Linux and macOS.
-- N9 (resume for incremental backups), N10 (shared retry with backoff), N11 (closing S3 connections), N12 (B2 v3/v4
-  API) and the performance work in section 9 are the next phases.
+- N10 is done (`94e121f`). N9 (resume for incremental backups): the incomplete snapshot is only written in hash
+  mode, and making quick-mode backups resumable changes when entries are marked complete; needs its own design.
+- N11 (closing idle S3 connections on exit, #688) and N12 (B2 v3/v4 API): need testing against the real services.
+- P4 (`CleanSnapshotCache` HEAD storm): no change needed. The storage is only asked about sequence chunks missing
+  from the local cache, not once per chunk per snapshot as first thought.
+- C3b (chunk hashing in the upload workers): moves the dedup check off the chunker goroutine, touching the code
+  that the B2 fix and C3a just changed; worth doing once those have been used for a while. The chunk hash is
+  still computed on the chunker goroutine, which remains the backup bottleneck on fast storage.
+- M3 (memory-based `-max-in-memory-entries`) and M4 / P6 (pools sized by `threads` instead of `NumCPU()*16`):
+  after M1 and M2 the pools hold average-sized buffers and entries no longer carry attributes, so the remaining
+  gain is small except on many-core hosts.
+- I3 restore worker pool and direct writes: the CLI restores in place, so the rename is already skipped for
+  in-place updates; a worker pool for per-file syscalls needs care with directory times and ordering.
+- I2 `fadvise` hints, I4, C5, P5, P8, W2 (S3 listing cache), W4 (`ListObjectsV2`, PR #655): small or need a real
+  backend to measure.
+- Phase 5 leftovers: aws-sdk-go v2, msgpack v5, the Google API / gRPC upgrade (250+ releases, needs real GCS and
+  Google Drive testing; carries the remaining non-reachable govulncheck findings), and the Azure SDK fork with the
+  unmaintained `dgrijalva/jwt-go`. govulncheck reports no reachable vulnerabilities.
 
 ## 0. What was done
 
