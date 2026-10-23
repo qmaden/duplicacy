@@ -34,6 +34,9 @@ func flagDetails(flag cli.Flag) (name string, argument string, usage string) {
 		return f.Name, f.Argument, f.Usage + " (can be repeated)"
 	case cli.IntSliceFlag:
 		return f.Name, f.Argument, f.Usage + " (can be repeated)"
+	case cli.GenericFlag:
+		// Used for tri-state options such as -no-backup, which also accept -no-backup=false
+		return f.Name, "[=" + f.Arg + "]", f.Usage
 	default:
 		return fmt.Sprintf("%v", flag), "", ""
 	}
@@ -48,7 +51,9 @@ func flagTable(flags []cli.Flag) string {
 	for _, flag := range flags {
 		name, argument, usage := flagDetails(flag)
 		option := "-" + strings.Split(name, ",")[0]
-		if argument != "" {
+		if strings.HasPrefix(argument, "[=") {
+			option += argument
+		} else if argument != "" {
 			option += " " + argument
 		}
 		usage = strings.ReplaceAll(usage, "|", "\\|")

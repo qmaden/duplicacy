@@ -279,12 +279,12 @@ duplicacy set [options]
 
 | Option | Description |
 |--------|-------------|
-| `--encrypt` |  |
-| `--no-backup[=true]	backup to this storage is prohibited` |  |
-| `--no-restore[=true]	restore from this storage is prohibited` |  |
-| `--no-save-password[=true]	don't save password or access keys to keychain/keyring` |  |
+| `-encrypt[=true]` | encrypt the storage with a password |
+| `-no-backup[=true]` | backup to this storage is prohibited |
+| `-no-restore[=true]` | restore from this storage is prohibited |
+| `-no-save-password[=true]` | don't save password or access keys to keychain/keyring |
 | `-nobackup-file <file name>` | Directories containing a file with this name will not be backed up |
-| `--exclude-by-attribute[=true]	Exclude files based on file attributes. (macOS only` |  |
+| `-exclude-by-attribute[=true]` | Exclude files based on file attributes. (macOS only, com_apple_backup_excludeItem) |
 | `-key` | add a key/password whose value is supplied by the -value option |
 | `-value` | the value of the key/password |
 | `-storage <storage name>` | use the specified storage instead of the default one |
