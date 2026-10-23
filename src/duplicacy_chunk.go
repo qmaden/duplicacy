@@ -109,8 +109,14 @@ func CreateChunk(config *Config, bufferNeeded bool) *Chunk {
 	if bufferNeeded {
 		buffer = AllocateChunkBuffer()
 		buffer.Reset()
-		if buffer.Cap() < config.MaximumChunkSize {
-			buffer.Grow(config.MaximumChunkSize - buffer.Cap())
+		// Most chunks are close to the average size, so buffers start at twice the average rather than at the
+		// maximum (four times larger by default); the rare larger chunk grows its buffer as needed
+		initialSize := 2 * config.AverageChunkSize
+		if initialSize == 0 || initialSize > config.MaximumChunkSize {
+			initialSize = config.MaximumChunkSize
+		}
+		if buffer.Cap() < initialSize {
+			buffer.Grow(initialSize - buffer.Cap())
 		}
 	}
 

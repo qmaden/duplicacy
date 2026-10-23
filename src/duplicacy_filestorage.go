@@ -12,9 +12,16 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// fileCopyBuffers holds 1 MiB buffers for reading chunk files
+var fileCopyBuffers = sync.Pool{New: func() interface{} {
+	buffer := make([]byte, 1<<20)
+	return &buffer
+}}
 
 // FileStorage is a local on-disk file storage implementing the Storage interface.
 type FileStorage struct {
@@ -143,7 +150,15 @@ func (storage *FileStorage) DownloadFile(threadIndex int, filePath string, chunk
 	}
 
 	defer file.Close()
-	if _, err = RateLimitedCopy(chunk, file, storage.DownloadRateLimit/storage.numberOfThreads); err != nil {
+	rate := storage.DownloadRateLimit / storage.numberOfThreads
+	if rate <= 0 {
+		// Read in large blocks rather than the 32 KiB that io.Copy uses
+		buffer := fileCopyBuffers.Get().(*[]byte)
+		defer fileCopyBuffers.Put(buffer)
+		_, err = io.CopyBuffer(chunk, struct{ io.Reader }{file}, *buffer)
+		return err
+	}
+	if _, err = RateLimitedCopy(chunk, file, rate); err != nil {
 		return err
 	}
 
@@ -189,8 +204,13 @@ func (storage *FileStorage) UploadFile(threadIndex int, filePath string, content
 		return err
 	}
 
-	reader := CreateRateLimitedReader(content, storage.UploadRateLimit/storage.numberOfThreads)
-	_, err = io.Copy(file, reader)
+	if storage.UploadRateLimit <= 0 {
+		// One write per chunk: io.Copy would write 32 KiB at a time, which is very slow on SMR disks (upstream #670)
+		_, err = file.Write(content)
+	} else {
+		reader := CreateRateLimitedReader(content, storage.UploadRateLimit/storage.numberOfThreads)
+		_, err = io.Copy(file, reader)
+	}
 	if err != nil {
 		file.Close()
 		return err
