@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -137,6 +138,12 @@ func getRevisions(context *cli.Context) (revisions []int) {
 func setGlobalOptions(context *cli.Context) {
 	if context.GlobalBool("log") {
 		duplicacy.EnableLogHeader()
+	}
+
+	// A soft limit makes the garbage collector work harder as the limit is approached, instead of letting the heap
+	// grow until the system (a small NAS, a container) kills the process
+	if limit := context.GlobalInt("memory-limit"); limit > 0 {
+		debug.SetMemoryLimit(int64(limit) << 20)
 	}
 
 	if context.GlobalBool("stack") {
@@ -2277,6 +2284,11 @@ func main() {
 		cli.BoolFlag{
 			Name:  "background",
 			Usage: "read passwords, tokens, or keys only from keychain/keyring or env",
+		},
+		cli.IntFlag{
+			Name:     "memory-limit",
+			Usage:    "soft limit on the memory used by Duplicacy, in MB (the GOMEMLIMIT environment variable also works)",
+			Argument: "<MB>",
 		},
 		cli.StringFlag{
 			Name:     "profile",
