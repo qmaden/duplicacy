@@ -15,7 +15,7 @@ import (
 	"path"
 	"sync"
 
-	"github.com/vmihailenco/msgpack"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // This struct stores information about a file entry that has been modified

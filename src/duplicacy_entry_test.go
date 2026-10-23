@@ -16,7 +16,7 @@ import (
 	"testing"
 
 	"github.com/gilbertchen/xattr"
-	"github.com/vmihailenco/msgpack"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 func TestEntrySort(t *testing.T) {

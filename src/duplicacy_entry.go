@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vmihailenco/msgpack"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // This is the hidden directory in the repository for storing various files.

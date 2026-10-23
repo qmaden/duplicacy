@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vmihailenco/msgpack"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Snapshot represents a backup of the repository.

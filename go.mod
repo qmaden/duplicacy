@@ -25,7 +25,7 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.22
 	github.com/pkg/sftp v1.11.0
 	github.com/pkg/xattr v0.4.1
-	github.com/vmihailenco/msgpack v4.0.4+incompatible
+	github.com/vmihailenco/msgpack/v5 v5.4.1
 	golang.org/x/crypto v0.58.0
 	golang.org/x/net v0.61.0
 	golang.org/x/oauth2 v0.37.0
@@ -69,6 +69,7 @@ require (
 	github.com/spacemonkeygo/monkit/v3 v3.0.22 // indirect
 	github.com/vaughan0/go-ini v0.0.0-20130923145212-a98ad7ee00ec // indirect
 	github.com/vivint/infectious v0.0.0-20200605153912-25a574ae18a3 // indirect
+	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/zeebo/blake3 v0.2.3 // indirect
 	github.com/zeebo/errs v1.3.0 // indirect
 	go.opencensus.io v0.22.3 // indirect
