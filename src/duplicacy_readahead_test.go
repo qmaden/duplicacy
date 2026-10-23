@@ -141,3 +141,62 @@ func TestRestorePrefetchesAcrossFiles(t *testing.T) {
 		t.Errorf("Only %.1f of 8 threads were downloading on average", concurrency)
 	}
 }
+
+// P3: metadata chunks were downloaded one at a time; the sequence downloader keeps several in flight but returns
+// them in order.
+func TestSequenceDownloader(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+
+	config := CreateConfigFromParameters(DEFAULT_COMPRESSION_LEVEL, 4096, 16384, 1024, false, nil, false)
+	fileStorage, err := CreateFileStorage(t.TempDir(), false, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileStorage.SetDefaultNestingLevels([]int{1}, 1)
+	fileStorage.CreateDirectory(0, "chunks")
+	storage := &slowDownloadStorage{FileStorage: fileStorage, delay: 50 * time.Millisecond}
+
+	operator := CreateChunkOperator(config, storage, nil, false, false, 4, false)
+	defer operator.Stop()
+	operator.UploadCompletionFunc = func(chunk *Chunk, chunkIndex int, inCache bool, chunkSize int, uploadSize int) {
+		config.PutChunk(chunk)
+	}
+	var hashes []string
+	var contents [][]byte
+	for i := 0; i < 12; i++ {
+		data := compressionTestData(3000, int64(i), 1)
+		chunk := config.GetChunk()
+		chunk.Reset(true)
+		chunk.Write(data)
+		hashes = append(hashes, chunk.GetHash())
+		contents = append(contents, data)
+		operator.Upload(chunk, i, true)
+	}
+	operator.WaitForCompletion()
+
+	start := time.Now()
+	downloader := operator.NewSequenceDownloader(hashes, true)
+	for i := range hashes {
+		chunk := downloader.Next()
+		if !bytes.Equal(chunk.GetBytes(), contents[i]) {
+			t.Fatalf("Chunk %d of the sequence is wrong", i)
+		}
+		config.PutChunk(chunk)
+	}
+	if downloader.Next() != nil {
+		t.Error("The downloader returned more chunks than the sequence has")
+	}
+	elapsed := time.Since(start)
+	t.Logf("12 chunks with 50 ms per download took %v with 4 threads", elapsed)
+	if elapsed > 400*time.Millisecond {
+		t.Errorf("Downloading 12 chunks took %v; they were not downloaded in parallel", elapsed)
+	}
+
+	// Abandoning a sequence must not leave downloads behind
+	partial := operator.NewSequenceDownloader(hashes, true)
+	config.PutChunk(partial.Next())
+	partial.Close()
+	operator.WaitForCompletion()
+}

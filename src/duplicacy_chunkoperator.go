@@ -630,3 +630,68 @@ func (operator *ChunkOperator) rewriteChunk(threadIndex int, chunk *Chunk, chunk
 		operator.collectionLock.Unlock()
 	}
 }
+
+// sequenceDownloader returns the chunks of a sequence in order while downloading up to 'window' of the following
+// chunks in parallel.  Metadata (file lists, chunk and length sequences) used to be downloaded one chunk at a time,
+// one round trip per chunk.
+type sequenceDownloader struct {
+	operator   *ChunkOperator
+	hashes     []string
+	isMetadata bool
+	results    []chan *Chunk
+	issued     int
+	consumed   int
+	window     int
+}
+
+// NewSequenceDownloader starts downloading the chunks of a sequence.  Close must be called if not every chunk is
+// taken with Next.
+func (operator *ChunkOperator) NewSequenceDownloader(hashes []string, isMetadata bool) *sequenceDownloader {
+	window := operator.threads
+	if window < 1 {
+		window = 1
+	} else if window > 16 {
+		window = 16
+	}
+	downloader := &sequenceDownloader{
+		operator:   operator,
+		hashes:     hashes,
+		isMetadata: isMetadata,
+		results:    make([]chan *Chunk, len(hashes)),
+		window:     window,
+	}
+	downloader.fill()
+	return downloader
+}
+
+func (downloader *sequenceDownloader) fill() {
+	for downloader.issued < len(downloader.hashes) && downloader.issued-downloader.consumed < downloader.window {
+		index := downloader.issued
+		result := make(chan *Chunk, 1)
+		downloader.results[index] = result
+		downloader.operator.DownloadAsync(downloader.hashes[index], index, downloader.isMetadata, func(chunk *Chunk, chunkIndex int) {
+			result <- chunk
+		})
+		downloader.issued++
+	}
+}
+
+// Next returns the next chunk of the sequence, which the caller must return with PutChunk, or nil at the end.
+func (downloader *sequenceDownloader) Next() *Chunk {
+	if downloader.consumed >= len(downloader.hashes) {
+		return nil
+	}
+	chunk := <-downloader.results[downloader.consumed]
+	downloader.results[downloader.consumed] = nil
+	downloader.consumed++
+	downloader.fill()
+	return chunk
+}
+
+// Close waits for the chunks downloaded ahead but not taken and returns them to the pool.
+func (downloader *sequenceDownloader) Close() {
+	for ; downloader.consumed < downloader.issued; downloader.consumed++ {
+		downloader.operator.config.PutChunk(<-downloader.results[downloader.consumed])
+		downloader.results[downloader.consumed] = nil
+	}
+}

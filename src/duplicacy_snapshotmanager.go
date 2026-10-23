@@ -29,6 +29,9 @@ import (
 const (
 	secondsInDay = 86400
 
+	// The threads of the chunk operator the snapshot manager creates for itself to download metadata
+	metadataDownloadThreads = 4
+
 	// Snapshots must end at least this many seconds after a fossil collection before they count as having started
 	// after it (see FossilCollection.IsDeletable)
 	minimumClockMargin = 15 * 60
@@ -309,9 +312,11 @@ func (manager *SnapshotManager) CreateChunkOperator(resurrect bool, rewriteChunk
 
 // DownloadSequence returns the content represented by a sequence of chunks.
 func (manager *SnapshotManager) DownloadSequence(sequence []string) (content []byte) {
-	manager.CreateChunkOperator(false, false, 1, false)
-	for _, chunkHash := range sequence {
-		chunk := manager.chunkOperator.Download(chunkHash, 0, true)
+	// Metadata chunks are small and many, so several are downloaded at once
+	manager.CreateChunkOperator(false, false, metadataDownloadThreads, false)
+	downloader := manager.chunkOperator.NewSequenceDownloader(sequence, true)
+	for range sequence {
+		chunk := downloader.Next()
 		content = append(content, chunk.GetBytes()...)
 		manager.config.PutChunk(chunk)
 	}

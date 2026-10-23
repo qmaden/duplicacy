@@ -105,17 +105,16 @@ func (snapshot *Snapshot) ListLocalFiles(top string, nobackupFile string,
 
 func (snapshot *Snapshot) ListRemoteFiles(config *Config, chunkOperator *ChunkOperator, entryOut func(*Entry) bool) {
 
-	var chunks []string
-	for _, chunkHash := range snapshot.FileSequence {
-		chunks = append(chunks, chunkOperator.config.GetChunkIDFromHash(chunkHash))
-	}
+	// The file list chunks are downloaded ahead in parallel and consumed in order
+	sequence := chunkOperator.NewSequenceDownloader(snapshot.FileSequence, true)
+	defer sequence.Close()
 
 	var chunk *Chunk
 	reader := NewSequenceReader(snapshot.FileSequence, func(chunkHash string) []byte {
 		if chunk != nil {
 			config.PutChunk(chunk)
 		}
-		chunk = chunkOperator.Download(chunkHash, 0, true)
+		chunk = sequence.Next()
 		return chunk.GetBytes()
 	})
 
