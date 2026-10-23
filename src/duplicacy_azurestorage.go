@@ -5,54 +5,77 @@
 package duplicacy
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
-	"github.com/gilbertchen/azure-sdk-for-go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/streaming"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 )
 
 type AzureStorage struct {
 	StorageBase
 
-	containers []*storage.Container
+	container       *container.Client
+	numberOfThreads int
 }
-
-// NumberOfThreads returns the number of threads the storage keeps per-thread state for.
-func (storage *AzureStorage) NumberOfThreads() int { return len(storage.containers) }
 
 func CreateAzureStorage(accountName string, accountKey string,
 	containerName string, threads int) (azureStorage *AzureStorage, err error) {
+	return createAzureStorage(fmt.Sprintf("https://%s.blob.core.windows.net/", accountName), accountName, accountKey,
+		containerName, threads)
+}
 
-	var containers []*storage.Container
-	for i := 0; i < threads; i++ {
+// createAzureStorage creates an Azure storage object for the blob service at 'serviceURL'.
+func createAzureStorage(serviceURL string, accountName string, accountKey string, containerName string,
+	threads int) (azureStorage *AzureStorage, err error) {
 
-		client, err := storage.NewBasicClient(accountName, accountKey)
-
-		if err != nil {
-			return nil, err
-		}
-
-		blobService := client.GetBlobService()
-		container := blobService.GetContainerReference(containerName)
-		containers = append(containers, container)
-	}
-
-	exist, err := containers[0].Exists()
+	credential, err := container.NewSharedKeyCredential(accountName, accountKey)
 	if err != nil {
 		return nil, err
 	}
 
-	if !exist {
-		return nil, fmt.Errorf("container %s does not exist", containerName)
+	// The client is safe for concurrent use; it retries transient errors itself
+	options := &container.ClientOptions{ClientOptions: policy.ClientOptions{Transport: newHTTPClient(threads)}}
+	client, err := container.NewClientWithSharedKeyCredential(strings.TrimSuffix(serviceURL, "/")+"/"+
+		url.PathEscape(containerName), credential, options)
+	if err != nil {
+		return nil, err
 	}
 
+	_, err = client.GetProperties(context.Background(), nil)
+	if bloberror.HasCode(err, bloberror.ContainerNotFound) {
+		return nil, fmt.Errorf("container %s does not exist", containerName)
+	} else if err != nil {
+		return nil, err
+	}
+
+	if threads < 1 {
+		threads = 1
+	}
 	azureStorage = &AzureStorage{
-		containers: containers,
+		container:       client,
+		numberOfThreads: threads,
 	}
 
 	azureStorage.DerivedStorage = azureStorage
 	azureStorage.SetDefaultNestingLevels([]int{0}, 0)
 	return
+}
+
+// isAzureNotFound returns true if the error is a 404 response.
+func isAzureNotFound(err error) bool {
+	var responseError *azcore.ResponseError
+	return bloberror.HasCode(err, bloberror.BlobNotFound) ||
+		(errors.As(err, &responseError) && responseError.StatusCode == http.StatusNotFound)
 }
 
 // ListFiles return the list of files and subdirectories under 'dir' (non-recursively)
@@ -63,65 +86,78 @@ func (azureStorage *AzureStorage) ListFiles(threadIndex int, dir string) (files 
 	}
 	dirLength := len(dir)
 
-	parameters := storage.ListBlobsParameters{
-		Prefix:    dir,
-		Delimiter: "",
-	}
-
 	subDirs := make(map[string]bool)
 
-	for {
-
-		results, err := azureStorage.containers[threadIndex].ListBlobs(parameters)
+	pager := azureStorage.container.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{Prefix: &dir})
+	for pager.More() {
+		page, err := pager.NextPage(context.Background())
 		if err != nil {
 			return nil, nil, err
 		}
 
-		if dir == "snapshots/" {
-			for _, blob := range results.Blobs {
-				name := strings.Split(blob.Name[dirLength:], "/")[0]
-				subDirs[name+"/"] = true
-			}
-		} else {
-			for _, blob := range results.Blobs {
-				files = append(files, blob.Name[dirLength:])
-				sizes = append(sizes, blob.Properties.ContentLength)
+		for _, item := range page.Segment.BlobItems {
+			name := (*item.Name)[dirLength:]
+			if dir == "snapshots/" {
+				subDirs[strings.Split(name, "/")[0]+"/"] = true
+			} else {
+				files = append(files, name)
+				var size int64
+				if item.Properties != nil && item.Properties.ContentLength != nil {
+					size = *item.Properties.ContentLength
+				}
+				sizes = append(sizes, size)
 			}
 		}
-
-		if results.NextMarker == "" {
-			break
-		}
-
-		parameters.Marker = results.NextMarker
 	}
 
 	if dir == "snapshots/" {
-
 		for subDir := range subDirs {
 			files = append(files, subDir)
 		}
-
 	}
 
 	return files, sizes, nil
-
 }
 
 // DeleteFile deletes the file or directory at 'filePath'.
 func (storage *AzureStorage) DeleteFile(threadIndex int, filePath string) (err error) {
-	_, err = storage.containers[threadIndex].GetBlobReference(filePath).DeleteIfExists(nil)
+	_, err = storage.container.NewBlobClient(filePath).Delete(context.Background(), nil)
+	if isAzureNotFound(err) {
+		return nil
+	}
 	return err
 }
 
 // MoveFile renames the file.
 func (storage *AzureStorage) MoveFile(threadIndex int, from string, to string) (err error) {
-	source := storage.containers[threadIndex].GetBlobReference(from)
-	destination := storage.containers[threadIndex].GetBlobReference(to)
-	err = destination.Copy(source.GetURL(), nil)
+	source := storage.container.NewBlobClient(from)
+	destination := storage.container.NewBlobClient(to)
+	response, err := destination.StartCopyFromURL(context.Background(), source.URL(), nil)
 	if err != nil {
 		return err
 	}
+
+	// A copy within an account usually completes immediately, but the service may finish it asynchronously
+	status := response.CopyStatus
+	for wait := 100 * time.Millisecond; status != nil && *status == blob.CopyStatusTypePending; {
+		time.Sleep(wait)
+		if wait < 5*time.Second {
+			wait *= 2
+		}
+		properties, err := destination.GetProperties(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+		status = properties.CopyStatus
+		if status != nil && *status != blob.CopyStatusTypePending && *status != blob.CopyStatusTypeSuccess {
+			description := ""
+			if properties.CopyStatusDescription != nil {
+				description = *properties.CopyStatusDescription
+			}
+			return fmt.Errorf("copying %s to %s ended with status %s: %s", from, to, *status, description)
+		}
+	}
+
 	return storage.DeleteFile(threadIndex, from)
 }
 
@@ -132,50 +168,39 @@ func (storage *AzureStorage) CreateDirectory(threadIndex int, dir string) (err e
 
 // GetFileInfo returns the information about the file or directory at 'filePath'.
 func (storage *AzureStorage) GetFileInfo(threadIndex int, filePath string) (exist bool, isDir bool, size int64, err error) {
-	blob := storage.containers[threadIndex].GetBlobReference(filePath)
-	err = blob.GetProperties(nil)
+	properties, err := storage.container.NewBlobClient(filePath).GetProperties(context.Background(), nil)
 	if err != nil {
-		if strings.Contains(err.Error(), "404") {
+		if isAzureNotFound(err) {
 			return false, false, 0, nil
 		} else {
 			return false, false, 0, err
 		}
 	}
 
-	return true, false, blob.Properties.ContentLength, nil
+	if properties.ContentLength != nil {
+		size = *properties.ContentLength
+	}
+	return true, false, size, nil
 }
 
 // DownloadFile reads the file at 'filePath' into the chunk.
 func (storage *AzureStorage) DownloadFile(threadIndex int, filePath string, chunk *Chunk) (err error) {
-	readCloser, err := storage.containers[threadIndex].GetBlobReference(filePath).Get(nil)
+	response, err := storage.container.NewBlobClient(filePath).DownloadStream(context.Background(), nil)
 	if err != nil {
 		return err
 	}
 
-	defer readCloser.Close()
+	defer response.Body.Close()
 
-	_, err = RateLimitedCopy(chunk, readCloser, storage.DownloadRateLimit/len(storage.containers))
+	_, err = RateLimitedCopy(chunk, response.Body, storage.DownloadRateLimit/storage.numberOfThreads)
 	return err
 }
 
 // UploadFile writes 'content' to the file at 'filePath'.
 func (storage *AzureStorage) UploadFile(threadIndex int, filePath string, content []byte) (err error) {
-
-	tries := 0
-
-	for {
-		reader := CreateRateLimitedReader(content, storage.UploadRateLimit/len(storage.containers))
-		blob := storage.containers[threadIndex].GetBlobReference(filePath)
-		err = blob.CreateBlockBlobFromReader(reader, nil)
-
-		if err == nil || !strings.Contains(err.Error(), "write: broken pipe") || tries >= 3 {
-			return err
-		}
-
-		LOG_INFO("AZURE_RETRY", "Connection unexpectedly terminated: %v; retrying", err)
-		tries++
-	}
-
+	reader := CreateRateLimitedReader(content, storage.UploadRateLimit/storage.numberOfThreads)
+	_, err = storage.container.NewBlockBlobClient(filePath).Upload(context.Background(), streaming.NopCloser(reader), nil)
+	return err
 }
 
 // If a local snapshot cache is needed for the storage to avoid downloading/uploading chunks too often when

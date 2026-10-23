@@ -114,9 +114,10 @@ func exerciseCloudStorage(t *testing.T, storage Storage, count int) {
 
 var fakeS3Endpoint, fakeGCSServer = "", (*fakestorage.Server)(nil)
 var fakeDriveServer *httptest.Server
+var fakeAzuriteContainer string
 var fakeCloudLock sync.Mutex
 
-// loadFakeCloudStorage returns a storage on an in-process fake for '-storage fake-s3', 'fake-gcs' or 'fake-gcd', so
+// loadFakeCloudStorage returns a storage on an in-process fake for '-storage fake-s3', 'fake-gcs', 'fake-gcd' or 'azurite', so
 // that the backup, restore, prune and copy tests can run against those backends without credentials.  It returns
 // nil for other storage names.
 func loadFakeCloudStorage(threads int) (Storage, error) {
@@ -156,6 +157,24 @@ func loadFakeCloudStorage(threads int) (Storage, error) {
 		}
 		storage, err := createGCDStorage("", "storage", threads, false, drive.DriveScope,
 			option.WithEndpoint(fakeDriveServer.URL+"/drive/v3/"), option.WithHTTPClient(fakeDriveServer.Client()))
+		if err != nil {
+			return nil, err
+		}
+		storage.SetDefaultNestingLevels([]int{2, 3}, 2)
+		return storage, nil
+	case "azurite":
+		serviceURL, account, key := azuriteSettings()
+		if serviceURL == "" {
+			return nil, fmt.Errorf("DUPLICACY_TEST_AZURITE_URL is not set")
+		}
+		if fakeAzuriteContainer == "" {
+			name, err := createAzuriteContainer()
+			if err != nil {
+				return nil, err
+			}
+			fakeAzuriteContainer = name
+		}
+		storage, err := createAzureStorage(serviceURL, account, key, fakeAzuriteContainer, threads)
 		if err != nil {
 			return nil, err
 		}
