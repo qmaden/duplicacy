@@ -2122,7 +2122,7 @@ func newApp() *cli.App {
 				},
 				cli.GenericFlag{
 					Name:  "exclude-by-attribute",
-					Usage: "Exclude files based on file attributes. (macOS only, com_apple_backup_excludeItem)",
+					Usage: "exclude files and directories marked with the extended attribute user.duplicacy_exclude (Linux) or excluded from Time Machine (macOS)",
 					Value: &TriBool{},
 					Arg:   "true",
 				},

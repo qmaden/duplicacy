@@ -95,6 +95,8 @@ All notable changes to this fork are listed here. The format follows
 - With patterns, restore left the directories above restored files with default permissions (upstream #84).
 - The chunk operator could report completion before all queued tasks had finished; copy counted chunks with a data
   race and reported existing chunks as copied; restore progress used a stale total.
+- `-exclude-by-attribute` never excluded anything on Linux: it looked for `duplicacy_exclude` while attributes are
+  listed as `user.duplicacy_exclude`.
 - A failed Google Cloud Storage upload was reported as a success.
 - Listing chunks on Google Drive could hang (prune, check), and its retry counters had a data race.
 - S3: only the first 1,000 snapshot ids were listed.

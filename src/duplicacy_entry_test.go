@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gilbertchen/xattr"
+	"github.com/pkg/xattr"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -269,10 +269,17 @@ func TestEntryExcludeByAttribute(t *testing.T) {
 		}
 	}
 
+	// The attribute that excludes a file differs by platform; it is set with the library the backup reads it with
+	excludeName, excludeValue := "user.duplicacy_exclude", []byte("1")
+	if runtime.GOOS == "darwin" {
+		excludeName, excludeValue = "com.apple.metadata:com_apple_backup_excludeItem", []byte("com.apple.backupd")
+	}
 	for _, file := range DATA {
 		fullPath := filepath.Join(testDir, file)
 		if strings.Contains(file, "exclude") {
-			xattr.Setxattr(fullPath, "com.apple.metadata:com_apple_backup_excludeItem", []byte("com.apple.backupd"))
+			if err := xattr.Set(fullPath, excludeName, excludeValue); err != nil {
+				t.Skipf("Extended attributes aren't supported here: %v", err)
+			}
 		}
 	}
 

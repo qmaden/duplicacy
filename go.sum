@@ -127,8 +127,6 @@ github.com/gilbertchen/gopass v0.0.0-20170109162249-bf9dde6d0d2c h1:0SR0aXvil/eQ
 github.com/gilbertchen/gopass v0.0.0-20170109162249-bf9dde6d0d2c/go.mod h1:HDsXH7AAfDsfYYX0te4zsNbnwVvZ2RtLEOCjN4y84jw=
 github.com/gilbertchen/keyring v0.0.0-20221004152639-1661cbebc508 h1:SqTyk5KkNXp7zTdTttIZSDcTrL5uau4K/2OpKvgBZVI=
 github.com/gilbertchen/keyring v0.0.0-20221004152639-1661cbebc508/go.mod h1:w/pisxUZezf2XzU9Ewjphcf6q1mZtOzKPHhJiuc8cag=
-github.com/gilbertchen/xattr v0.0.0-20160926155429-68e7a6806b01 h1:LqwS9qL6SrDkp0g0iwUkETrDdtB9gTKaIbSn9imUq5o=
-github.com/gilbertchen/xattr v0.0.0-20160926155429-68e7a6806b01/go.mod h1:TMlibuxKfkdtHyltooAw7+DHqRpaXs9nxaffk00Sh1Q=
 github.com/go-jose/go-jose/v4 v4.1.4 h1:moDMcTHmvE6Groj34emNPLs/qtYXRVcd6S7NHbHz3kA=
 github.com/go-jose/go-jose/v4 v4.1.4/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=

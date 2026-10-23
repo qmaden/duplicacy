@@ -37,6 +37,9 @@ and earlier versions can read storages written by this one.
 
 ### Backup
 
+- On Linux, `-exclude-by-attribute` now excludes files and directories with the extended attribute
+  `user.duplicacy_exclude` (set with `setfattr -n user.duplicacy_exclude <path>`). It never worked before, so
+  repositories using it will back up fewer files.
 - New option `-strict`: exit with code **4** when any file or directory was skipped because of an access error.
   Without it the exit code is 0 as before.
 - Resuming an interrupted backup first checks that the chunks it uploaded still exist (prune may have removed

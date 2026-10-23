@@ -284,7 +284,7 @@ duplicacy set [options]
 | `-no-restore[=true]` | restore from this storage is prohibited |
 | `-no-save-password[=true]` | don't save password or access keys to keychain/keyring |
 | `-nobackup-file <file name>` | Directories containing a file with this name will not be backed up |
-| `-exclude-by-attribute[=true]` | Exclude files based on file attributes. (macOS only, com_apple_backup_excludeItem) |
+| `-exclude-by-attribute[=true]` | exclude files and directories marked with the extended attribute user.duplicacy_exclude (Linux) or excluded from Time Machine (macOS) |
 | `-key` | add a key/password whose value is supplied by the -value option |
 | `-value` | the value of the key/password |
 | `-storage <storage name>` | use the specified storage instead of the default one |

@@ -4,7 +4,12 @@
 
 package duplicacy
 
+// Files and directories with the extended attribute user.duplicacy_exclude are excluded.  The attributes are
+// listed with their namespace, so the check used to look for a name that never appears.
 func excludedByAttribute(attirbutes map[string][]byte) bool {
-	_, ok := attirbutes["duplicacy_exclude"]
+	_, ok := attirbutes["user.duplicacy_exclude"]
+	if !ok {
+		_, ok = attirbutes["duplicacy_exclude"]
+	}
 	return ok
 }
