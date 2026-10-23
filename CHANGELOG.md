@@ -19,6 +19,11 @@ All notable changes to this fork are listed here. The format follows
 - `check -chunks -reverify-days N` verifies again chunks last verified more than N days ago.
 - `prune` takes an advisory `prune.lock` on the storage; `-ignore-lock` overrides it.
 - Restore with `-overwrite` replaces paths that changed between a file and a directory (upstream #429).
+- Global option `-memory-limit <MB>` sets a soft memory limit for the Go runtime (upstream #340).
+- Failed chunk uploads and downloads are retried up to three times, after 2, 8 and 30 seconds (upstream #683).
+- Benchmarks for chunk encryption, decryption and chunking (`go test -bench . ./src`).
+- Documentation: generated command reference (`docs/COMMANDS.md`), `docs/storage-backends.md`,
+  `docs/ARCHITECTURE.md`, `docs/PRUNE_SAFETY.md` and decision records in `docs/adr/`; the README describes the fork.
 
 ### Security
 
@@ -33,6 +38,8 @@ All notable changes to this fork are listed here. The format follows
 - Cloud secrets are no longer echoed at prompts.
 - RSA private keys in the OpenSSH format and unencrypted PKCS#8 are supported; inline keys are no longer printed in
   error messages.
+- Dependency upgrades fix GO-2026-5841 (klauspost/compress), GO-2022-0391 (aws-sdk-go) and GO-2024-2611
+  (protobuf).
 
 ### Changed
 
@@ -44,6 +51,18 @@ All notable changes to this fork are listed here. The format follows
 - `prune -keep` policies are sorted by age; policies given out of order used to be skipped silently.
 - Fossils are deleted only after snapshots ending at least 15 minutes after the collection on strongly consistent
   storages, to tolerate clock skew.
+- Faster backup and restore with less memory: LZ4 through `pierrec/lz4` with the same chunk format, pooled zstd
+  codecs, chunk buffers sized from the average chunk size, single-write local chunk uploads (upstream #670), large
+  files read ahead and hashed on a second core, metadata chunks downloaded in parallel, and restore prefetching
+  across files (upstream #541). Extended attributes are read when each entry is stored instead of being kept for
+  the whole backup (backing up 200,000 files on macOS: peak memory 743 MB to 198 MB).
+- B2, OneDrive, WebDAV, File Fabric and Wasabi reuse one connection per thread and time out stalled connections
+  (30 s to connect, 5 minutes for a response to start) instead of hanging (upstream #644, #480).
+- SFTP tries keys from a running ssh-agent before asking for a password or a key file (upstream #687); the SSH key
+  prompts say they are for logging in, not the RSA encryption key (upstream #695).
+- BLAKE2b is computed by `golang.org/x/crypto/blake2b` instead of the unmaintained `minio/blake2b-simd` (same
+  hashes, checked against recorded vectors). `klauspost/compress` 1.20.3, `aws-sdk-go` 1.55.8, protobuf 1.36.12.
+- `io/ioutil` replaced and unused code removed.
 
 ### Fixed
 

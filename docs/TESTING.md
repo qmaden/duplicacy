@@ -71,6 +71,26 @@ Regenerate only for an intended and reviewed format addition, and keep old fixtu
 cd src && DUPLICACY_GENERATE_FIXTURES=1 go test -run TestGenerateFixtures .
 ```
 
+## Benchmarks
+
+Chunk encryption and decryption (LZ4 and zstd) and the chunker:
+
+```bash
+cd src && go test -run '^$' -bench . -benchmem .
+```
+
+Compare before and after a performance change on the same machine (for example with `benchstat`), and measure
+end to end as well: most gains in this code come from overlapping I/O, which micro-benchmarks don't show.
+
+## Generated command reference
+
+`docs/COMMANDS.md` is generated from the CLI definitions, and `TestCommandReference` fails when it's out of date.
+After changing a command or option:
+
+```bash
+DUPLICACY_UPDATE_DOCS=1 go test -run TestCommandReference ./duplicacy
+```
+
 ## Integration scripts
 
 `integration_tests/*.sh` are the original shell tests. They expect a binary at `../duplicacy_main` relative to

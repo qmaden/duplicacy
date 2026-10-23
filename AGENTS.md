@@ -28,7 +28,7 @@ kept but not built or tested.
 | `src/testdata/fixtures` | Golden storages that must always restore identically (see its README) |
 | `integration_tests/` | Old shell-based integration tests (need a built binary) |
 | `REVIEW_PLAN.md` | Review findings with IDs (B1, S1, N1, P1 …) and the remediation plan |
-| `docs/` | Building, testing, format and security documentation |
+| `docs/` | Command reference, storage backends, architecture, prune safety, format, security, building, testing, decision records (`docs/adr/`) |
 
 ## Build and test
 
@@ -49,6 +49,10 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 The `-args` flags for storage tests are `-erasure-coding`, `-separate-metadata`, `-rsa` and
 `-fixed-chunk-size`. Tests use a local file storage under the system temp directory unless `-storage <name>` and
 a git-ignored `src/test_storage.conf` are provided.
+
+After changing a command or option, regenerate `docs/COMMANDS.md` (a test fails otherwise):
+`DUPLICACY_UPDATE_DOCS=1 go test -run TestCommandReference ./duplicacy`. New storage backends and credential keys
+go into `docs/storage-backends.md`.
 
 Do **not** build with `-tags noasm` and don't add assembly. See `docs/BUILDING.md`.
 

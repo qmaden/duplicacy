@@ -15,6 +15,10 @@ and earlier versions can read storages written by this one.
   server to `~/.ssh/known_hosts` (e.g. with `ssh-keyscan` after checking the fingerprint), or set
   `DUPLICACY_SSH_ACCEPT_NEW_HOST_KEY=1` for the first run.
 - A changed host key is refused as before; the error now names the file and line to fix.
+- With an SSH agent running (`SSH_AUTH_SOCK`), its keys are tried before a password, and no key file is asked for
+  when the agent has keys. If the agent holds a key the server accepts, you are no longer asked for the SSH password.
+  A server that locks accounts after a few failed key attempts may count the agent's other keys; remove them from
+  the agent or unset `SSH_AUTH_SOCK` for Duplicacy.
 
 ### Restore
 
@@ -37,6 +41,20 @@ and earlier versions can read storages written by this one.
   Without it the exit code is 0 as before.
 - Resuming an interrupted backup first checks that the chunks it uploaded still exist (prune may have removed
   them) and starts over if any is missing. On storages with slow lookups this adds a check per uploaded chunk.
+- A failed chunk upload or download is retried three times (after 2, 8 and 30 seconds) before the command fails,
+  so a backup that hits a persistent error now takes about 40 seconds longer to stop.
+
+### Storage connections
+
+- B2, OneDrive, WebDAV, File Fabric and Wasabi now give up on a connection that takes more than 30 seconds to
+  connect or more than 5 minutes before the server starts responding; the request is then retried as above.
+  Transfers themselves have no time limit.
+
+### Memory
+
+- The new global option `-memory-limit <MB>` (or the `GOMEMLIMIT` environment variable) makes the garbage
+  collector keep memory below the limit where possible, at some CPU cost. It is a soft limit: a backup that needs
+  more still gets it.
 
 ### Prune
 
@@ -46,7 +64,7 @@ and earlier versions can read storages written by this one.
 - Prune writes `prune.lock` to the storage while it runs and refuses to start while another prune's lock is less
   than 24 hours old. If a prune was killed, delete `prune.lock` or pass `-ignore-lock`. Dry runs don't use the
   lock.
-- On strongly consistent storages (local disk, SFTP, SMB, B2, GCS, Azure), fossils are deleted only once every
+- On strongly consistent storages (local disk, SFTP, SMB, B2, GCS, Azure, Wasabi), fossils are deleted only once every
   snapshot id has a revision ending at least 15 minutes after the fossil collection (it was immediately after),
   to tolerate clock differences between computers. A warning is printed when a snapshot ended in the future.
 
