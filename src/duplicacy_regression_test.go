@@ -740,3 +740,68 @@ func TestPartialRestoreSetsParentAttributes(t *testing.T) {
 		}
 	}
 }
+
+// flakyStorage fails the first uploads and downloads, like a connection that drops for a moment.
+type flakyStorage struct {
+	*FileStorage
+	uploadFailures   int32
+	downloadFailures int32
+}
+
+func (storage *flakyStorage) UploadFile(threadIndex int, filePath string, content []byte) error {
+	if atomic.AddInt32(&storage.uploadFailures, -1) >= 0 {
+		return fmt.Errorf("connection reset by peer")
+	}
+	return storage.FileStorage.UploadFile(threadIndex, filePath, content)
+}
+
+func (storage *flakyStorage) DownloadFile(threadIndex int, filePath string, chunk *Chunk) error {
+	if atomic.AddInt32(&storage.downloadFailures, -1) >= 0 {
+		return fmt.Errorf("connection reset by peer")
+	}
+	return storage.FileStorage.DownloadFile(threadIndex, filePath, chunk)
+}
+
+// N10 (upstream #683): a transient upload or download error used to end the whole backup or restore.
+func TestChunkTransfersAreRetried(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+	savedDelays := chunkRetryDelays
+	chunkRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	defer func() { chunkRetryDelays = savedDelays }()
+
+	config := CreateConfigFromParameters(DEFAULT_COMPRESSION_LEVEL, 4096, 16384, 1024, false, nil, false)
+	fileStorage, err := CreateFileStorage(t.TempDir(), false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileStorage.SetDefaultNestingLevels([]int{1}, 1)
+	fileStorage.CreateDirectory(0, "chunks")
+	storage := &flakyStorage{FileStorage: fileStorage, uploadFailures: 2, downloadFailures: 2}
+
+	operator := CreateChunkOperator(config, storage, nil, false, false, 1, false)
+	defer operator.Stop()
+	uploaded := false
+	operator.UploadCompletionFunc = func(chunk *Chunk, chunkIndex int, inCache bool, chunkSize int, uploadSize int) {
+		uploaded = uploadSize > 0
+		config.PutChunk(chunk)
+	}
+
+	data := fixtureBytes(3000, 42)
+	chunk := config.GetChunk()
+	chunk.Reset(true)
+	chunk.Write(data)
+	hash := chunk.GetHash()
+	operator.Upload(chunk, 0, false)
+	operator.WaitForCompletion()
+	if !uploaded {
+		t.Fatal("The chunk was not uploaded after two transient failures")
+	}
+
+	downloaded := operator.Download(hash, 0, false)
+	if !bytes.Equal(downloaded.GetBytes(), data) {
+		t.Error("The chunk was not downloaded correctly after two transient failures")
+	}
+	config.PutChunk(downloaded)
+}

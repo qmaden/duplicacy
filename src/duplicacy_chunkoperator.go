@@ -21,6 +21,10 @@ const (
 	ChunkOperationFind      = 5
 )
 
+// chunkRetryDelays are the waits before each retry of a failed chunk transfer.  It is a variable so that tests can
+// shorten it.
+var chunkRetryDelays = []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second}
+
 // ChunkTask is used to pass parameters for different kinds of chunk operations.
 type ChunkTask struct {
 	operation  int    // The type of operation
@@ -426,10 +430,13 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 
 		err = operator.storage.DownloadFile(threadIndex, filePath, chunk)
 		if err != nil {
-			_, isHubic := operator.storage.(*HubicStorage)
-			// Retry on EOF or if it is a Hubic backend as it may return 404 even when the chunk exists
-			if (err == io.ErrUnexpectedEOF || isHubic) && downloadAttempt < MaxDownloadAttempts {
+			// The chunk was found, so a failed download is retried (Hubic may also return 404 for an existing
+			// chunk); errors other than a truncated transfer wait before the next attempt
+			if downloadAttempt < MaxDownloadAttempts {
 				LOG_WARN("DOWNLOAD_RETRY", "Failed to download the chunk %s: %v; retrying", chunkID, err)
+				if err != io.ErrUnexpectedEOF && downloadAttempt < len(chunkRetryDelays) {
+					time.Sleep(chunkRetryDelays[downloadAttempt])
+				}
 				chunk.Reset(false)
 				chunk.isMetadata = task.isMetadata
 				continue
@@ -557,7 +564,16 @@ func (operator *ChunkOperator) UploadChunk(threadIndex int, task ChunkTask) bool
 	}
 
 	if !operator.config.dryRun {
-		err = operator.storage.UploadFile(threadIndex, chunkPath, chunk.GetBytes())
+		// A chunk upload can be repeated safely, so transient failures (a dropped connection, a busy server) are
+		// retried with increasing delays before the backup gives up (upstream #683)
+		for attempt := 0; ; attempt++ {
+			err = operator.storage.UploadFile(threadIndex, chunkPath, chunk.GetBytes())
+			if err == nil || attempt >= len(chunkRetryDelays) {
+				break
+			}
+			LOG_WARN("UPLOAD_RETRY", "Failed to upload the chunk %s: %v; retrying in %v", chunkID, err, chunkRetryDelays[attempt])
+			time.Sleep(chunkRetryDelays[attempt])
+		}
 		if err != nil {
 			LOG_ERROR("UPLOAD_CHUNK", "Failed to upload the chunk %s: %v", chunkID, err)
 			return false
