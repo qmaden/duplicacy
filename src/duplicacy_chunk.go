@@ -21,7 +21,6 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/bkaradzic/go-lz4"
 	"github.com/klauspost/compress/zstd"
 	"github.com/klauspost/reedsolomon"
 	"github.com/minio/highwayhash"
@@ -323,40 +322,25 @@ func (chunk *Chunk) Encrypt(encryptionKey []byte, derivationKey string, isMetada
 			compressionLevel = zstd.SpeedBestCompression
 		}
 
-		deflater, err := zstd.NewWriter(encryptedBuffer, zstd.WithEncoderLevel(compressionLevel))
-		if err != nil {
-			return err
-		}
-
-		// Make sure we have enough space in encryptedBuffer
-		availableLength := encryptedBuffer.Cap() - len(encryptedBuffer.Bytes())
-		maximumLength := deflater.MaxEncodedSize(chunk.buffer.Len())
-		if availableLength < maximumLength {
-			encryptedBuffer.Grow(maximumLength - availableLength)
-		}
-		_, err = deflater.Write(chunk.buffer.Bytes())
+		// Leave room for incompressible data so that the encoder appends in place
+		encryptedBuffer.Grow(chunk.buffer.Len() + chunk.buffer.Len()/128 + 1024)
+		prefixLength := encryptedBuffer.Len()
+		encoded, err := zstdEncode(compressionLevel, encryptedBuffer.Bytes(), chunk.buffer.Bytes())
 		if err != nil {
 			return fmt.Errorf("ZSTD compression error: %v", err)
 		}
-
-		err = deflater.Close()
-		if err != nil {
-			return fmt.Errorf("ZSTD compression error: %v", err)
-		}
+		// The encoded data follows the prefix, normally in the buffer's own spare capacity
+		encryptedBuffer.Write(encoded[prefixLength:])
 	} else if chunk.config.CompressionLevel == DEFAULT_COMPRESSION_LEVEL {
 		encryptedBuffer.Write([]byte("LZ4 "))
-		// Make sure we have enough space in encryptedBuffer
-		availableLength := encryptedBuffer.Cap() - len(encryptedBuffer.Bytes())
-		maximumLength := lz4.CompressBound(len(chunk.buffer.Bytes()))
-		if availableLength < maximumLength {
-			encryptedBuffer.Grow(maximumLength - availableLength)
-		}
-		written, err := lz4.Encode(encryptedBuffer.Bytes()[offset+4:], chunk.buffer.Bytes())
+		// Encode into the buffer's spare capacity, then move the write pointer over it
+		bound := lz4EncodedBound(chunk.buffer.Len())
+		encryptedBuffer.Grow(bound)
+		contents := encryptedBuffer.Bytes()
+		written, err := lz4Encode(contents[len(contents):len(contents)+bound], chunk.buffer.Bytes())
 		if err != nil {
 			return fmt.Errorf("LZ4 compression error: %v", err)
 		}
-		// written is actually encryptedBuffer[offset + 4:], but we need to move the write pointer
-		// and this seems to be the only way
 		encryptedBuffer.Write(written)
 	} else {
 		return fmt.Errorf("Invalid compression level: %d", chunk.config.CompressionLevel)
@@ -714,14 +698,8 @@ func (chunk *Chunk) Decrypt(encryptionKey []byte, derivationKey string) (err err
 	compressed := encryptedBuffer.Bytes()
 	if len(compressed) > 4 && string(compressed[:4]) == "LZ4 " {
 		chunk.buffer.Reset()
-		// The LZ4 data starts with the decompressed length, which the decoder would allocate
-		if len(compressed) < 8 {
-			return fmt.Errorf("LZ4 data truncated (%d bytes)", len(compressed)), false
-		}
-		if length := binary.LittleEndian.Uint32(compressed[4:8]); uint64(length) > uint64(limit) {
-			return fmt.Errorf("LZ4 data claims %d bytes, more than the maximum of %d", length, limit), false
-		}
-		decompressed, err := lz4.Decode(chunk.buffer.Bytes(), encryptedBuffer.Bytes()[4:])
+		// The LZ4 data starts with the decompressed length, which is checked against the limit before decoding
+		decompressed, err := lz4Decode(chunk.buffer.Bytes(), compressed[4:], limit)
 		if err != nil {
 			return err, false
 		}
@@ -738,15 +716,11 @@ func (chunk *Chunk) Decrypt(encryptionKey []byte, derivationKey string) (err err
 		chunk.hasher = chunk.config.NewKeyedHasher(chunk.config.HashKey)
 		chunk.hash = nil
 
-		encryptedBuffer.Read(encryptedBuffer.Bytes()[:4])
-		inflater, err := zstd.NewReader(encryptedBuffer, zstd.WithDecoderMaxMemory(uint64(limit)))
+		decompressed, err := zstdDecode(chunk.buffer.Bytes(), compressed[4:], limit)
 		if err != nil {
 			return err, false
 		}
-		defer inflater.Close()
-		if err = copyDecompressed(chunk, inflater, limit); err != nil {
-			return err, false
-		}
+		chunk.Write(decompressed)
 		return nil, rewriteNeeded
 	}
 

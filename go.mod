@@ -23,6 +23,7 @@ require (
 	github.com/minio/blake2b-simd v0.0.0-20160723061019-3f5f724cb5b1
 	github.com/minio/highwayhash v1.0.2
 	github.com/ncw/swift/v2 v2.0.1
+	github.com/pierrec/lz4/v4 v4.1.22
 	github.com/pkg/sftp v1.11.0
 	github.com/pkg/xattr v0.4.1
 	github.com/vmihailenco/msgpack v4.0.4+incompatible
