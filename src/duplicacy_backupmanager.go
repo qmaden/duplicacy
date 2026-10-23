@@ -552,7 +552,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 
 	totalMetadataChunkLength, numberOfNewMetadataChunks,
 		totalUploadedMetadataChunkLength, totalUploadedMetadataChunkBytes :=
-		manager.UploadSnapshot(chunkOperator, top, localSnapshot, localEntryList, chunkCache, metadataChunkSize)
+		manager.UploadSnapshot(chunkOperator, shadowTop, localSnapshot, localEntryList, chunkCache, metadataChunkSize)
 
 	if showStatistics && !RunInBackground {
 		for _, entry := range localEntryList.ModifiedEntries {
@@ -1301,8 +1301,11 @@ func (manager *BackupManager) UploadSnapshot(chunkOperator *ChunkOperator, top s
 			entry.EndChunk = delta
 		}
 
+		// Extended attributes are only read now, from the same tree the files were read from
+		entry.ReadAttributes(top)
 		buffer.Reset()
 		err := encoder.Encode(entry)
+		entry.Attributes = nil
 		if err != nil {
 			LOG_ERROR("SNAPSHOT_UPLOAD", "Metadata for %s can't be encoded: %v", entry.Path, err)
 			return err

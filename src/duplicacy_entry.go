@@ -777,11 +777,15 @@ func ListEntries(top string, path string, patterns []string, nobackupFile string
 			}
 		}
 
-		entry.ReadAttributes(top)
-
-		if excludeByAttribute && entry.Attributes != nil && excludedByAttribute(*entry.Attributes) {
-			LOG_DEBUG("LIST_EXCLUDE", "%s is excluded by attribute", entry.Path)
-			continue
+		// Extended attributes are read when the entry is stored in the snapshot rather than here: keeping them for
+		// every entry of a large tree took a lot of memory (on macOS most files have at least one)
+		if excludeByAttribute {
+			entry.ReadAttributes(top)
+			if entry.Attributes != nil && excludedByAttribute(*entry.Attributes) {
+				LOG_DEBUG("LIST_EXCLUDE", "%s is excluded by attribute", entry.Path)
+				continue
+			}
+			entry.Attributes = nil
 		}
 
 		if f.Mode()&(os.ModeNamedPipe|os.ModeSocket|os.ModeDevice) != 0 {
