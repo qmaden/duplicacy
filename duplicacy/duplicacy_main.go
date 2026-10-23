@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -22,13 +23,15 @@ import (
 
 	"github.com/gilbertchen/cli"
 
-	"io/ioutil"
-
-	"github.com/gilbertchen/duplicacy/src"
+	duplicacy "github.com/gilbertchen/duplicacy/src"
 )
 
 const (
 	ArgumentExitCode = 3
+
+	// The backup completed but some files or directories were skipped because of access errors; only used with
+	// 'backup -strict' so that existing scripts keep seeing 0
+	SkippedExitCode = 4
 )
 
 var ScriptEnabled bool
@@ -135,6 +138,12 @@ func setGlobalOptions(context *cli.Context) {
 		duplicacy.EnableLogHeader()
 	}
 
+	// A soft limit makes the garbage collector work harder as the limit is approached, instead of letting the heap
+	// grow until the system (a small NAS, a container) kills the process
+	if limit := context.GlobalInt("memory-limit"); limit > 0 {
+		debug.SetMemoryLimit(int64(limit) << 20)
+	}
+
 	if context.GlobalBool("stack") {
 		duplicacy.EnableStackTrace()
 	}
@@ -204,7 +213,7 @@ func runScript(context *cli.Context, storageName string, phase string) bool {
 	for _, line := range strings.Split(string(output), "\n") {
 		line := strings.TrimSpace(line)
 		if line != "" {
-			duplicacy.LOG_INFO("SCRIPT_OUTPUT", line)
+			duplicacy.LOG_INFO("SCRIPT_OUTPUT", "%s", line)
 		}
 	}
 
@@ -305,7 +314,7 @@ func configRepository(context *cli.Context, init bool) {
 			return
 		}
 
-		err = os.Mkdir(preferencePath, 0744)
+		err = os.Mkdir(preferencePath, 0700)
 		if err != nil && !os.IsExist(err) {
 			duplicacy.LOG_ERROR("REPOSITORY_INIT", "Failed to create the directory %s: %v",
 				preferencePath, err)
@@ -316,7 +325,7 @@ func configRepository(context *cli.Context, init bool) {
 			// write real path into .duplicacy file inside repository
 			duplicacyFileName := path.Join(repository, duplicacy.DUPLICACY_FILE)
 			d1 := []byte(preferencePath)
-			err = ioutil.WriteFile(duplicacyFileName, d1, 0644)
+			err = os.WriteFile(duplicacyFileName, d1, 0644)
 			if err != nil {
 				duplicacy.LOG_ERROR("REPOSITORY_PATH", "Failed to write %s file inside repository  %v", duplicacyFileName, err)
 				return
@@ -688,14 +697,21 @@ func changePassword(context *cli.Context) {
 		duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The new passwords do not match")
 		return
 	}
-	if newPassword == password {
-		duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The new password is the same as the old one")
+	iterations := context.Int("iterations")
+	if newPassword == password && iterations == 0 {
+		// Keeping the password is allowed when only the key derivation is being changed
+		duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The new password is the same as the old one; specify -iterations to "+
+			"only change the number of iterations")
 		return
 	}
-
-	iterations := context.Int("iterations")
 	if iterations == 0 {
 		iterations = duplicacy.CONFIG_DEFAULT_ITERATIONS
+	}
+
+	// Check the new password before the old config is deleted from the storage
+	if len(newPassword) < 8 {
+		duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The password must be at least 8 characters")
+		return
 	}
 
 	description, err := json.MarshalIndent(config, "", "    ")
@@ -705,7 +721,7 @@ func changePassword(context *cli.Context) {
 	}
 
 	configPath := path.Join(duplicacy.GetDuplicacyPreferencePath(), "config")
-	err = ioutil.WriteFile(configPath, description, 0600)
+	err = os.WriteFile(configPath, description, 0600)
 	if err != nil {
 		duplicacy.LOG_ERROR("CONFIG_SAVE", "Failed to save the old config to %s: %v", configPath, err)
 		return
@@ -730,7 +746,17 @@ func changePassword(context *cli.Context) {
 		return
 	}
 
-	duplicacy.UploadConfig(storage, config, newPassword, iterations)
+	if err = duplicacy.SaveConfig(storage, config, newPassword, iterations); err != nil {
+		// The storage has no config now; put it back with the old password
+		duplicacy.LOG_WARN("PASSWORD_CHANGE", "Failed to save the config with the new password: %v", err)
+		if restoreErr := duplicacy.SaveConfig(storage, config, password, iterations); restoreErr == nil {
+			duplicacy.LOG_ERROR("PASSWORD_CHANGE", "The password was not changed; the old password is still in effect")
+		} else {
+			duplicacy.LOG_ERROR("PASSWORD_CHANGE", "Failed to restore the config (%v); it can be restored from %s",
+				restoreErr, configPath)
+		}
+		return
+	}
 
 	duplicacy.SavePassword(*preference, "password", newPassword)
 
@@ -811,6 +837,12 @@ func backupRepository(context *cli.Context) {
 	backupManager.Backup(repository, quickMode, threads, context.String("t"), showStatistics, enableVSS, vssTimeout, enumOnly, metadataChunkSize, maximumInMemoryEntries)
 
 	runScript(context, preference.Name, "post")
+
+	if context.Bool("strict") && backupManager.SkippedEntries > 0 {
+		duplicacy.LOG_WARN("BACKUP_STRICT", "Exiting with code %d because %d file(s) or directories were skipped",
+			SkippedExitCode, backupManager.SkippedEntries)
+		os.Exit(SkippedExitCode)
+	}
 }
 
 func restoreRepository(context *cli.Context) {
@@ -1006,6 +1038,7 @@ func checkSnapshots(context *cli.Context) {
 	persist := context.Bool("persist")
 
 	backupManager.SetupSnapshotCache(preference.Name)
+	backupManager.SnapshotManager.ReverifyAfterDays = context.Int("reverify-days")
 	backupManager.SnapshotManager.CheckSnapshots(id, revisions, tag, showStatistics, showTabular, checkFiles, checkChunks, searchFossils, resurrect, rewrite, threads, persist)
 
 	runScript(context, preference.Name, "post")
@@ -1043,7 +1076,6 @@ func printFile(context *cli.Context) {
 	if context.String("id") != "" {
 		snapshotID = context.String("id")
 	}
-
 
 	backupManager := duplicacy.CreateBackupManager(preference.SnapshotID, storage, repository, password, "", "", false)
 	duplicacy.SavePassword(*preference, "password", password)
@@ -1215,6 +1247,7 @@ func pruneSnapshots(context *cli.Context) {
 	duplicacy.SavePassword(*preference, "password", password)
 
 	backupManager.SetupSnapshotCache(preference.Name)
+	backupManager.SnapshotManager.IgnorePruneLock = context.Bool("ignore-lock")
 	backupManager.SnapshotManager.PruneSnapshots(selfID, snapshotID, revisions, tags, retentions,
 		exhaustive, exclusive, ignoredIDs, dryRun, deleteOnly, collectOnly, threads)
 
@@ -1291,7 +1324,7 @@ func copySnapshots(context *cli.Context) {
 	destinationStorage.SetRateLimits(0, context.Int("upload-limit-rate"))
 
 	destinationManager := duplicacy.CreateBackupManager(destination.SnapshotID, destinationStorage, repository,
-		                                                  destinationPassword, "", "", false)
+		destinationPassword, "", "", false)
 	duplicacy.SavePassword(*destination, "password", destinationPassword)
 	destinationManager.SetupSnapshotCache(destination.Name)
 
@@ -1416,13 +1449,34 @@ func benchmark(context *cli.Context) {
 	if storage == nil {
 		return
 	}
-	duplicacy.Benchmark(repository, storage, int64(fileSize) * 1024 * 1024, chunkSize * 1024 * 1024, chunkCount, uploadThreads, downloadThreads)
+	duplicacy.Benchmark(repository, storage, int64(fileSize)*1024*1024, chunkSize*1024*1024, chunkCount, uploadThreads, downloadThreads)
 }
 
 func main() {
 
 	duplicacy.SetLoggingLevel(duplicacy.INFO)
 
+	app := newApp()
+
+	// If the program is interrupted, call the RunAtError function.
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		for range c {
+			duplicacy.RunAtError()
+			os.Exit(1)
+		}
+	}()
+
+	err := app.Run(os.Args)
+	if err != nil {
+		os.Exit(2)
+	}
+
+}
+
+// newApp defines the commands and options of the CLI; docs/COMMANDS.md is generated from it.
+func newApp() *cli.App {
 	app := cli.NewApp()
 
 	app.Commands = []cli.Command{
@@ -1455,12 +1509,12 @@ func main() {
 					Argument: "<level>",
 				},
 				cli.BoolFlag{
-					Name:     "zstd",
-					Usage:    "short for -zstd default",
+					Name:  "zstd",
+					Usage: "short for -zstd default",
 				},
 				cli.IntFlag{
 					Name:     "iterations",
-					Usage:    "the number of iterations used in storage key derivation (default is 16384)",
+					Usage:    "the number of iterations used in storage key derivation (default is 600000)",
 					Argument: "<i>",
 				},
 				cli.StringFlag{
@@ -1531,12 +1585,16 @@ func main() {
 					Argument: "<level>",
 				},
 				cli.BoolFlag{
-					Name:     "zstd",
-					Usage:    "short for -zstd default",
+					Name:  "zstd",
+					Usage: "short for -zstd default",
 				},
 				cli.BoolFlag{
 					Name:  "vss",
 					Usage: "enable the Volume Shadow Copy service (Windows and macOS using APFS only)",
+				},
+				cli.BoolFlag{
+					Name:  "strict",
+					Usage: "exit with code 4 if any file or directory was skipped because of an access error",
 				},
 				cli.IntFlag{
 					Name:     "vss-timeout",
@@ -1565,7 +1623,6 @@ func main() {
 					Usage:    "the maximum number of entries kept in memory (defaults to 1M)",
 					Argument: "<number>",
 				},
-
 			},
 			Usage:     "Save a snapshot of the repository to the storage",
 			ArgsUsage: " ",
@@ -1625,7 +1682,7 @@ func main() {
 				cli.BoolFlag{
 					Name:  "persist",
 					Usage: "continue processing despite chunk errors or existing files (without -overwrite), reporting any affected files",
-        },
+				},
 				cli.StringFlag{
 					Name:     "key-passphrase",
 					Usage:    "the passphrase to decrypt the RSA private key",
@@ -1719,6 +1776,11 @@ func main() {
 				cli.BoolFlag{
 					Name:  "rewrite",
 					Usage: "rewrite chunks with recoverable corruption",
+				},
+				cli.IntFlag{
+					Name:     "reverify-days",
+					Usage:    "with -chunks, verify again chunks last verified more than <n> days ago (default: never)",
+					Argument: "<n>",
 				},
 				cli.BoolFlag{
 					Name:  "files",
@@ -1898,6 +1960,10 @@ func main() {
 					Usage: "remove all unreferenced chunks (not just those referenced by deleted snapshots)",
 				},
 				cli.BoolFlag{
+					Name:  "ignore-lock",
+					Usage: "run even if prune.lock shows that another prune may be in progress",
+				},
+				cli.BoolFlag{
 					Name:  "exclusive",
 					Usage: "assume exclusive access to the storage (disable two-step fossil collection)",
 				},
@@ -1945,7 +2011,7 @@ func main() {
 				},
 				cli.IntFlag{
 					Name:     "iterations",
-					Usage:    "the number of iterations used in storage key derivation (default is 16384)",
+					Usage:    "the number of iterations used in storage key derivation (default is 600000)",
 					Argument: "<i>",
 				},
 			},
@@ -1983,12 +2049,12 @@ func main() {
 					Argument: "<level>",
 				},
 				cli.BoolFlag{
-					Name:     "zstd",
-					Usage:    "short for -zstd default",
+					Name:  "zstd",
+					Usage: "short for -zstd default",
 				},
 				cli.IntFlag{
 					Name:     "iterations",
-					Usage:    "the number of iterations used in storage key derivation (default is 16384)",
+					Usage:    "the number of iterations used in storage key derivation (default is 600000)",
 					Argument: "<i>",
 				},
 				cli.StringFlag{
@@ -2056,7 +2122,7 @@ func main() {
 				},
 				cli.GenericFlag{
 					Name:  "exclude-by-attribute",
-					Usage: "Exclude files based on file attributes. (macOS only, com_apple_backup_excludeItem)",
+					Usage: "exclude files and directories marked with the extended attribute user.duplicacy_exclude (Linux) or excluded from Time Machine (macOS)",
 					Value: &TriBool{},
 					Arg:   "true",
 				},
@@ -2238,6 +2304,11 @@ func main() {
 			Name:  "background",
 			Usage: "read passwords, tokens, or keys only from keychain/keyring or env",
 		},
+		cli.IntFlag{
+			Name:     "memory-limit",
+			Usage:    "soft limit on the memory used by Duplicacy, in MB (the GOMEMLIMIT environment variable also works)",
+			Argument: "<MB>",
+		},
 		cli.StringFlag{
 			Name:     "profile",
 			Value:    "",
@@ -2249,8 +2320,8 @@ func main() {
 			Usage: "add a comment to identify the process",
 		},
 		cli.StringSliceFlag{
-			Name:  "suppress, s",
-			Usage: "suppress logs with the specified id",
+			Name:     "suppress, s",
+			Usage:    "suppress logs with the specified id",
 			Argument: "<id>",
 		},
 		cli.BoolFlag{
@@ -2271,19 +2342,5 @@ func main() {
 		os.Exit(2)
 	}
 
-	// If the program is interrupted, call the RunAtError function.
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	go func() {
-		for range c {
-			duplicacy.RunAtError()
-			os.Exit(1)
-		}
-	}()
-
-	err := app.Run(os.Args)
-	if err != nil {
-		os.Exit(2)
-	}
-
+	return app
 }

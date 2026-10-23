@@ -18,8 +18,12 @@ const (
 	ChunkOperationDelete    = 2
 	ChunkOperationFossilize = 3
 	ChunkOperationResurrect = 4
-	ChunkOperationFind = 5
+	ChunkOperationFind      = 5
 )
+
+// chunkRetryDelays are the waits before each retry of a failed chunk transfer.  It is a variable so that tests can
+// shorten it.
+var chunkRetryDelays = []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second}
 
 // ChunkTask is used to pass parameters for different kinds of chunk operations.
 type ChunkTask struct {
@@ -38,50 +42,58 @@ type ChunkTask struct {
 
 // ChunkOperator is capable of performing multi-threaded operations on chunks.
 type ChunkOperator struct {
-	config *Config               // Associated config
-	storage Storage              // This storage
+	config         *Config // Associated config
+	storage        Storage // This storage
 	snapshotCache  *FileStorage
 	showStatistics bool
-	threads  int                 // Number of threads
-	taskQueue chan ChunkTask     // Operating goroutines are waiting on this channel for input
-	stopChannel chan bool        // Used to stop all the goroutines
+	threads        int            // Number of threads
+	taskQueue      chan ChunkTask // Operating goroutines are waiting on this channel for input
+	stopChannel    chan bool      // Used to stop all the goroutines
 
-	numberOfActiveTasks int64    // The number of chunks that are being operated on
+	numberOfActiveTasks int64      // The number of chunks that are being operated on, guarded by taskLock
+	taskLock            sync.Mutex // Guards numberOfActiveTasks
+	tasksDone           *sync.Cond // Signalled when numberOfActiveTasks drops to 0
+	stopped             int32      // Set by the first call to Stop()
 
-	fossils []string             // For fossilize operation, the paths of the fossils are stored in this slice
-	collectionLock *sync.Mutex   // The lock for accessing 'fossils'
+	fossils        []string    // For fossilize operation, the paths of the fossils are stored in this slice
+	collectionLock *sync.Mutex // The lock for accessing 'fossils'
 
-	startTime int64              // The time it starts downloading
-	totalChunkSize int64         // Total chunk size
-	downloadedChunkSize int64    // Downloaded chunk size
+	startTime           int64 // The time it starts downloading
+	totalChunkSize      int64 // Total chunk size
+	downloadedChunkSize int64 // Downloaded chunk size
 
-	allowFailures bool           // Whether to fail on download error, or continue
-	NumberOfFailedChunks int64   // The number of chunks that can't be downloaded
+	allowFailures        bool  // Whether to fail on download error, or continue
+	NumberOfFailedChunks int64 // The number of chunks that can't be downloaded
 
-	rewriteChunks bool           // Whether to rewrite corrupted chunks when erasure coding is enabled
+	rewriteChunks bool // Whether to rewrite corrupted chunks when erasure coding is enabled
 
 	UploadCompletionFunc func(chunk *Chunk, chunkIndex int, inCache bool, chunkSize int, uploadSize int)
+
+	// For chunks added with UploadUnhashed: called on the worker once the chunk's id is known; returning true
+	// completes the chunk as already uploaded (inCache) without looking it up in the storage
+	UploadFilter func(chunk *Chunk) bool
 }
 
 // CreateChunkOperator creates a new ChunkOperator.
 func CreateChunkOperator(config *Config, storage Storage, snapshotCache *FileStorage, showStatistics bool, rewriteChunks bool, threads int,
-						 allowFailures bool) *ChunkOperator {
+	allowFailures bool) *ChunkOperator {
 
 	operator := &ChunkOperator{
-		config: config,
-		storage: storage,
-		snapshotCache: snapshotCache,
+		config:         config,
+		storage:        storage,
+		snapshotCache:  snapshotCache,
 		showStatistics: showStatistics,
-		threads: threads,
+		threads:        threads,
 
 		taskQueue:   make(chan ChunkTask, threads),
 		stopChannel: make(chan bool),
 
 		collectionLock: &sync.Mutex{},
-		startTime: time.Now().Unix(),
-		allowFailures: allowFailures,
-		rewriteChunks: rewriteChunks,
+		startTime:      time.Now().Unix(),
+		allowFailures:  allowFailures,
+		rewriteChunks:  rewriteChunks,
 	}
+	operator.tasksDone = sync.NewCond(&operator.taskLock)
 
 	// Start the operator goroutines
 	for i := 0; i < operator.threads; i++ {
@@ -102,44 +114,47 @@ func CreateChunkOperator(config *Config, storage Storage, snapshotCache *FileSto
 }
 
 func (operator *ChunkOperator) Stop() {
-	if atomic.LoadInt64(&operator.numberOfActiveTasks) < 0 {
+	// Stop() may be called more than once
+	if !atomic.CompareAndSwapInt32(&operator.stopped, 0, 1) {
 		return
 	}
 
-	for atomic.LoadInt64(&operator.numberOfActiveTasks) > 0 {
-		time.Sleep(100 * time.Millisecond)
-	}
+	operator.WaitForCompletion()
 	for i := 0; i < operator.threads; i++ {
 		operator.stopChannel <- false
 	}
 
-	// Assign -1 to numberOfActiveTasks so Stop() can be called multiple times
-	atomic.AddInt64(&operator.numberOfActiveTasks, int64(-1))
 }
 
+// WaitForCompletion returns once every task added so far has finished.
 func (operator *ChunkOperator) WaitForCompletion() {
-
-	for atomic.LoadInt64(&operator.numberOfActiveTasks) > 0 {
-		time.Sleep(100 * time.Millisecond)
+	operator.taskLock.Lock()
+	for operator.numberOfActiveTasks > 0 {
+		operator.tasksDone.Wait()
 	}
+	operator.taskLock.Unlock()
 }
 
-func (operator *ChunkOperator) AddTask(operation int, chunkID string, chunkHash string, filePath string, chunkIndex int, chunk *Chunk, isMetadata bool, skipCache bool, completionFunc func(*Chunk, int))  {
+func (operator *ChunkOperator) AddTask(operation int, chunkID string, chunkHash string, filePath string, chunkIndex int, chunk *Chunk, isMetadata bool, skipCache bool, completionFunc func(*Chunk, int)) {
 
-	task := ChunkTask {
-		operation:  operation,
-		chunkID:    chunkID,
-		chunkHash:  chunkHash,
-		chunkIndex: chunkIndex,
-		filePath:   filePath,
-		chunk:      chunk,
-		isMetadata: isMetadata,
-		skipCache:  skipCache,
+	task := ChunkTask{
+		operation:      operation,
+		chunkID:        chunkID,
+		chunkHash:      chunkHash,
+		chunkIndex:     chunkIndex,
+		filePath:       filePath,
+		chunk:          chunk,
+		isMetadata:     isMetadata,
+		skipCache:      skipCache,
 		completionFunc: completionFunc,
 	}
 
+	// Count the task before a worker can pick it up and finish it, so the count never drops below the number of
+	// tasks still pending and WaitForCompletion can't return early
+	operator.taskLock.Lock()
+	operator.numberOfActiveTasks++
+	operator.taskLock.Unlock()
 	operator.taskQueue <- task
-	atomic.AddInt64(&operator.numberOfActiveTasks, int64(1))
 
 	return
 }
@@ -161,12 +176,18 @@ func (operator *ChunkOperator) download(chunkHash string, chunkIndex int, isMeta
 		completionChannel <- chunk
 	}
 	operator.AddTask(ChunkOperationDownload, chunkID, chunkHash, "", chunkIndex, nil, isMetadata, skipCache, completionFunc)
-	return <- completionChannel
+	return <-completionChannel
 }
 
 func (operator *ChunkOperator) DownloadAsync(chunkHash string, chunkIndex int, isMetadata bool, completionFunc func(*Chunk, int)) {
 	chunkID := operator.config.GetChunkIDFromHash(chunkHash)
 	operator.AddTask(ChunkOperationDownload, chunkID, chunkHash, "", chunkIndex, nil, isMetadata, false, completionFunc)
+}
+
+// UploadUnhashed uploads a file chunk whose hash hasn't been computed yet; the worker computes it and applies
+// UploadFilter before uploading.
+func (operator *ChunkOperator) UploadUnhashed(chunk *Chunk, chunkIndex int) {
+	operator.AddTask(ChunkOperationUpload, "", "", "", chunkIndex, chunk, false, false, nil)
 }
 
 func (operator *ChunkOperator) Upload(chunk *Chunk, chunkIndex int, isMetadata bool) {
@@ -195,7 +216,12 @@ func (operator *ChunkOperator) Resurrect(chunkID string, filePath string) {
 
 func (operator *ChunkOperator) Run(threadIndex int, task ChunkTask) {
 	defer func() {
-		atomic.AddInt64(&operator.numberOfActiveTasks, int64(-1))
+		operator.taskLock.Lock()
+		operator.numberOfActiveTasks--
+		if operator.numberOfActiveTasks == 0 {
+			operator.tasksDone.Broadcast()
+		}
+		operator.taskLock.Unlock()
 	}()
 
 	if task.operation == ChunkOperationDownload {
@@ -310,7 +336,7 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 		if chunk != nil {
 			operator.config.PutChunk(chunk)
 		}
-	} ()
+	}()
 
 	if task.isMetadata && operator.snapshotCache != nil && !task.skipCache {
 
@@ -355,6 +381,9 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 		if operator.allowFailures {
 			chunk.isBroken = true
 			task.completionFunc(chunk, task.chunkIndex)
+			// The chunk now belongs to the caller; it must not also be returned to the pool by the deferred
+			// PutChunk, or two goroutines would end up sharing it
+			chunk = nil
 		}
 	}
 
@@ -421,10 +450,13 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 
 		err = operator.storage.DownloadFile(threadIndex, filePath, chunk)
 		if err != nil {
-			_, isHubic := operator.storage.(*HubicStorage)
-			// Retry on EOF or if it is a Hubic backend as it may return 404 even when the chunk exists
-			if (err == io.ErrUnexpectedEOF || isHubic) && downloadAttempt < MaxDownloadAttempts {
+			// The chunk was found, so a failed download is retried (Hubic may also return 404 for an existing
+			// chunk); errors other than a truncated transfer wait before the next attempt
+			if downloadAttempt < MaxDownloadAttempts {
 				LOG_WARN("DOWNLOAD_RETRY", "Failed to download the chunk %s: %v; retrying", chunkID, err)
+				if err != io.ErrUnexpectedEOF && downloadAttempt < len(chunkRetryDelays) {
+					time.Sleep(chunkRetryDelays[downloadAttempt])
+				}
 				chunk.Reset(false)
 				chunk.isMetadata = task.isMetadata
 				continue
@@ -465,35 +497,7 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 		}
 
 		if rewriteNeeded && operator.rewriteChunks {
-
-			if filePath != fossilPath {
-				fossilPath = filePath + ".fsl"
-				err := operator.storage.MoveFile(threadIndex, chunkPath, fossilPath)
-				if err != nil {
-					LOG_WARN("CHUNK_REWRITE", "Failed to fossilize the chunk %s: %v", task.chunkID, err)
-				} else {
-					LOG_TRACE("CHUNK_REWRITE", "The existing chunk %s has been marked as a fossil for rewrite", task.chunkID)
-					operator.collectionLock.Lock()
-					operator.fossils = append(operator.fossils, fossilPath)
-					operator.collectionLock.Unlock()
-				}
-			}
-
-			newChunk := operator.config.GetChunk()
-			newChunk.Reset(true)
-			newChunk.Write(chunk.GetBytes())
-			// Encrypt the chunk only after we know that it must be uploaded.
-			err = newChunk.Encrypt(operator.config.ChunkKey, chunk.GetHash(), task.isMetadata)
-			if err == nil {
-				// Re-upload the chunk
-				err = operator.storage.UploadFile(threadIndex, chunkPath, newChunk.GetBytes())
-				if err != nil {
-					LOG_WARN("CHUNK_REWRITE", "Failed to re-upload the chunk %s: %v", chunkID, err)
-				} else {
-					LOG_INFO("CHUNK_REWRITE", "The chunk %s has been re-uploaded", chunkID)
-				}
-			}
-			operator.config.PutChunk(newChunk)
+			operator.rewriteChunk(threadIndex, chunk, chunkID, chunkPath, filePath, fossilPath, task.isMetadata)
 		}
 
 		break
@@ -509,7 +513,8 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 
 	downloadedChunkSize := atomic.AddInt64(&operator.downloadedChunkSize, int64(chunk.GetLength()))
 
-	if (operator.showStatistics || IsTracing()) && operator.totalChunkSize > 0 {
+	totalChunkSize := atomic.LoadInt64(&operator.totalChunkSize)
+	if (operator.showStatistics || IsTracing()) && totalChunkSize > 0 {
 
 		now := time.Now().Unix()
 		if now <= operator.startTime {
@@ -518,9 +523,9 @@ func (operator *ChunkOperator) DownloadChunk(threadIndex int, task ChunkTask) {
 		speed := downloadedChunkSize / (now - operator.startTime)
 		remainingTime := int64(0)
 		if speed > 0 {
-			remainingTime = (operator.totalChunkSize-downloadedChunkSize)/speed + 1
+			remainingTime = (totalChunkSize-downloadedChunkSize)/speed + 1
 		}
-		percentage := float32(downloadedChunkSize * 1000 / operator.totalChunkSize)
+		percentage := float32(downloadedChunkSize * 1000 / totalChunkSize)
 		LOG_INFO("DOWNLOAD_PROGRESS", "Downloaded chunk %d size %d, %sB/s %s %.1f%%",
 			task.chunkIndex+1, chunk.GetLength(),
 			PrettySize(speed), PrettyTime(remainingTime), percentage/10)
@@ -539,6 +544,15 @@ func (operator *ChunkOperator) UploadChunk(threadIndex int, task ChunkTask) bool
 	chunk := task.chunk
 	chunkID := task.chunkID
 	chunkSize := chunk.GetLength()
+
+	if chunkID == "" {
+		// Added by UploadUnhashed: the hash is computed here rather than on the caller's goroutine
+		chunkID = chunk.GetID()
+		if operator.UploadFilter != nil && operator.UploadFilter(chunk) {
+			operator.UploadCompletionFunc(chunk, task.chunkIndex, true, chunkSize, 0)
+			return false
+		}
+	}
 
 	// The data in the buffer is checked against the chunk id by Encrypt() below
 
@@ -579,7 +593,16 @@ func (operator *ChunkOperator) UploadChunk(threadIndex int, task ChunkTask) bool
 	}
 
 	if !operator.config.dryRun {
-		err = operator.storage.UploadFile(threadIndex, chunkPath, chunk.GetBytes())
+		// A chunk upload can be repeated safely, so transient failures (a dropped connection, a busy server) are
+		// retried with increasing delays before the backup gives up (upstream #683)
+		for attempt := 0; ; attempt++ {
+			err = operator.storage.UploadFile(threadIndex, chunkPath, chunk.GetBytes())
+			if err == nil || attempt >= len(chunkRetryDelays) {
+				break
+			}
+			LOG_WARN("UPLOAD_RETRY", "Failed to upload the chunk %s: %v; retrying in %v", chunkID, err, chunkRetryDelays[attempt])
+			time.Sleep(chunkRetryDelays[attempt])
+		}
 		if err != nil {
 			LOG_ERROR("UPLOAD_CHUNK", "Failed to upload the chunk %s: %v", chunkID, err)
 			return false
@@ -591,4 +614,113 @@ func (operator *ChunkOperator) UploadChunk(threadIndex int, task ChunkTask) bool
 
 	operator.UploadCompletionFunc(chunk, task.chunkIndex, false, chunkSize, chunk.GetLength())
 	return true
+}
+
+// rewriteChunk stores a freshly encoded copy of a chunk that could only be read by recovering it from its erasure
+// coding parity.  The old copy is moved aside as a fossil first (some storages can't overwrite a file in place)
+// and moved back if the new copy can't be stored, so the chunk is never left only as a fossil.
+func (operator *ChunkOperator) rewriteChunk(threadIndex int, chunk *Chunk, chunkID string, chunkPath string,
+	filePath string, fossilPath string, isMetadata bool) {
+
+	// Encode the new copy before touching the old one
+	newChunk := operator.config.GetChunk()
+	defer operator.config.PutChunk(newChunk)
+	newChunk.Reset(true)
+	newChunk.Write(chunk.GetBytes())
+	if err := newChunk.Encrypt(operator.config.ChunkKey, chunk.GetHash(), isMetadata); err != nil {
+		LOG_WARN("CHUNK_REWRITE", "Failed to encode the chunk %s: %v", chunkID, err)
+		return
+	}
+
+	movedPath := ""
+	if filePath != fossilPath {
+		movedPath = filePath + ".fsl"
+		if err := operator.storage.MoveFile(threadIndex, chunkPath, movedPath); err != nil {
+			LOG_WARN("CHUNK_REWRITE", "Failed to fossilize the chunk %s; it is left as it is: %v", chunkID, err)
+			return
+		}
+		LOG_TRACE("CHUNK_REWRITE", "The existing chunk %s has been marked as a fossil for rewrite", chunkID)
+	}
+
+	if err := operator.storage.UploadFile(threadIndex, chunkPath, newChunk.GetBytes()); err != nil {
+		LOG_WARN("CHUNK_REWRITE", "Failed to re-upload the chunk %s: %v", chunkID, err)
+		if movedPath != "" {
+			if err = operator.storage.MoveFile(threadIndex, movedPath, chunkPath); err != nil {
+				LOG_WARN("CHUNK_REWRITE", "Failed to restore the chunk %s from %s: %v", chunkID, movedPath, err)
+			}
+		}
+		return
+	}
+
+	LOG_INFO("CHUNK_REWRITE", "The chunk %s has been re-uploaded", chunkID)
+	if movedPath != "" {
+		operator.collectionLock.Lock()
+		operator.fossils = append(operator.fossils, movedPath)
+		operator.collectionLock.Unlock()
+	}
+}
+
+// sequenceDownloader returns the chunks of a sequence in order while downloading up to 'window' of the following
+// chunks in parallel.  Metadata (file lists, chunk and length sequences) used to be downloaded one chunk at a time,
+// one round trip per chunk.
+type sequenceDownloader struct {
+	operator   *ChunkOperator
+	hashes     []string
+	isMetadata bool
+	results    []chan *Chunk
+	issued     int
+	consumed   int
+	window     int
+}
+
+// NewSequenceDownloader starts downloading the chunks of a sequence.  Close must be called if not every chunk is
+// taken with Next.
+func (operator *ChunkOperator) NewSequenceDownloader(hashes []string, isMetadata bool) *sequenceDownloader {
+	window := operator.threads
+	if window < 1 {
+		window = 1
+	} else if window > 16 {
+		window = 16
+	}
+	downloader := &sequenceDownloader{
+		operator:   operator,
+		hashes:     hashes,
+		isMetadata: isMetadata,
+		results:    make([]chan *Chunk, len(hashes)),
+		window:     window,
+	}
+	downloader.fill()
+	return downloader
+}
+
+func (downloader *sequenceDownloader) fill() {
+	for downloader.issued < len(downloader.hashes) && downloader.issued-downloader.consumed < downloader.window {
+		index := downloader.issued
+		result := make(chan *Chunk, 1)
+		downloader.results[index] = result
+		downloader.operator.DownloadAsync(downloader.hashes[index], index, downloader.isMetadata, func(chunk *Chunk, chunkIndex int) {
+			result <- chunk
+		})
+		downloader.issued++
+	}
+}
+
+// Next returns the next chunk of the sequence, which the caller must return with PutChunk, or nil at the end.
+func (downloader *sequenceDownloader) Next() *Chunk {
+	if downloader.consumed >= len(downloader.hashes) {
+		return nil
+	}
+	chunk := <-downloader.results[downloader.consumed]
+	downloader.results[downloader.consumed] = nil
+	downloader.consumed++
+	downloader.fill()
+	return chunk
+}
+
+// Close waits for the chunks downloaded ahead but not taken and returns them to the pool.
+func (downloader *sequenceDownloader) Close() {
+	for ; downloader.consumed < downloader.issued; downloader.consumed++ {
+		downloader.operator.config.PutChunk(<-downloader.results[downloader.consumed])
+		downloader.results[downloader.consumed] = nil
+	}
 }

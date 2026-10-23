@@ -8,8 +8,11 @@ import (
 	"bytes"
 	crypto_rand "crypto/rand"
 	"crypto/rsa"
+	"encoding/binary"
 	"math/rand"
 	"testing"
+
+	"github.com/gilbertchen/duplicacy/internal/wronghighwayhash"
 )
 
 func TestErasureCoding(t *testing.T) {
@@ -21,7 +24,7 @@ func TestErasureCoding(t *testing.T) {
 	config.MinimumChunkSize = 100
 	config.CompressionLevel = DEFAULT_COMPRESSION_LEVEL
 	config.DataShards = 5
-    config.ParityShards = 2
+	config.ParityShards = 2
 
 	chunk := CreateChunk(config, true)
 	chunk.Reset(true)
@@ -49,6 +52,60 @@ func TestErasureCoding(t *testing.T) {
 		return
 	}
 	return
+}
+
+// CLI 3.0.1 on arm64 stored shard checksums computed with an incorrect HighwayHash.  Such chunks must
+// decode on every architecture, and be flagged for rewriting.
+func TestErasureCodingWrongHighwayHash(t *testing.T) {
+	key := []byte("duplicacydefault")
+
+	config := CreateConfig()
+	config.HashKey = key
+	config.IDKey = key
+	config.MinimumChunkSize = 100
+	config.CompressionLevel = DEFAULT_COMPRESSION_LEVEL
+	config.DataShards = 5
+	config.ParityShards = 2
+
+	chunk := CreateChunk(config, true)
+	chunk.Reset(true)
+	data := make([]byte, 1000)
+	for i := 0; i < len(data); i++ {
+		data[i] = byte(i * 7)
+	}
+	chunk.Write(data)
+	err := chunk.Encrypt([]byte(""), "", false)
+	if err != nil {
+		t.Fatalf("Failed to encrypt the test data: %v", err)
+	}
+
+	// Replace every shard hash with the incorrect one, as CLI 3.0.1 on arm64 would have written it
+	encoded := make([]byte, chunk.GetLength())
+	copy(encoded, chunk.GetBytes())
+	bannerLength := len(ERASURE_CODING_BANNER)
+	chunkSize := int(binary.LittleEndian.Uint64(encoded[bannerLength:]))
+	shards := config.DataShards + config.ParityShards
+	shardSize := (chunkSize + config.DataShards - 1) / config.DataShards
+	hashOffset := bannerLength + 14
+	dataOffset := hashOffset + shards*32
+	for i := 0; i < shards; i++ {
+		hasher, _ := wronghighwayhash.New(make([]byte, 32))
+		hasher.Write(encoded[dataOffset+i*shardSize : dataOffset+(i+1)*shardSize])
+		copy(encoded[hashOffset+i*32:], hasher.Sum(nil))
+	}
+
+	chunk.Reset(false)
+	chunk.Write(encoded)
+	err, rewriteNeeded := chunk.Decrypt([]byte(""), "")
+	if err != nil {
+		t.Fatalf("Failed to decrypt the chunk with incorrect shard hashes: %v", err)
+	}
+	if !bytes.Equal(chunk.GetBytes(), data) {
+		t.Errorf("Decrypted data doesn't match the original data")
+	}
+	if !rewriteNeeded {
+		t.Errorf("A chunk with incorrect shard hashes should be flagged for rewriting")
+	}
 }
 
 // verifyChunk calls VerifyChecksum and reports whether it rejected the chunk, which is signaled by LOG_ERROR
@@ -256,13 +313,13 @@ func TestChunkBasic(t *testing.T) {
 		copy(encryptedData, chunk.GetBytes())
 
 		if *testErasureCoding {
-			offset := 24 + 32 * 7
-			start := rand.Int() % (len(encryptedData) - offset) + offset
+			offset := 24 + 32*7
+			start := rand.Int()%(len(encryptedData)-offset) + offset
 			length := (len(encryptedData) - offset) / 7
-			if start + length > len(encryptedData) {
+			if start+length > len(encryptedData) {
 				length = len(encryptedData) - start
 			}
-			crypto_rand.Read(encryptedData[start: start+length])
+			crypto_rand.Read(encryptedData[start : start+length])
 		}
 
 		chunk.Reset(false)

@@ -4,10 +4,11 @@
 package duplicacy
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,11 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"bytes"
-	"crypto/sha256"
 
-    "github.com/vmihailenco/msgpack"
-
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // This is the hidden directory in the repository for storing various files.
@@ -110,10 +108,10 @@ func (entry *Entry) Copy() *Entry {
 		UID: entry.UID,
 		GID: entry.GID,
 
-		StartChunk: entry.StartChunk,
+		StartChunk:  entry.StartChunk,
 		StartOffset: entry.StartOffset,
-		EndChunk: entry.EndChunk,
-		EndOffset: entry.EndOffset,
+		EndChunk:    entry.EndChunk,
+		EndOffset:   entry.EndOffset,
 
 		Attributes: entry.Attributes,
 	}
@@ -362,12 +360,12 @@ func (entry *Entry) EncodeMsgpack(encoder *msgpack.Encoder) error {
 
 	if entry.Attributes != nil {
 		attributes := make([]string, numberOfAttributes)
-        i := 0
-        for attribute := range *entry.Attributes {
-            attributes[i] = attribute
-            i++
-        }
-        sort.Strings(attributes)
+		i := 0
+		for attribute := range *entry.Attributes {
+			attributes[i] = attribute
+			i++
+		}
+		sort.Strings(attributes)
 		for _, attribute := range attributes {
 			err = encoder.EncodeString(attribute)
 			if err != nil {
@@ -380,7 +378,7 @@ func (entry *Entry) EncodeMsgpack(encoder *msgpack.Encoder) error {
 		}
 	}
 
-    return nil
+	return nil
 }
 
 func (entry *Entry) DecodeMsgpack(decoder *msgpack.Decoder) error {
@@ -498,8 +496,8 @@ func (entry *Entry) GetPermissions() os.FileMode {
 
 func (entry *Entry) GetParent() string {
 	path := entry.Path
-	if path != "" && path[len(path) - 1] == '/' {
-		path = path[:len(path) - 1]
+	if path != "" && path[len(path)-1] == '/' {
+		path = path[:len(path)-1]
 	}
 	i := strings.LastIndex(path, "/")
 	if i == -1 {
@@ -541,9 +539,16 @@ func (entry *Entry) RestoreMetadata(fullPath string, fileInfo *os.FileInfo, setO
 		}
 	}
 
+	// The setuid and setgid bits are only restored together with the owner (like tar), so that restoring a
+	// snapshot without its ownership can't produce setuid files owned by the user running the restore
+	permissions := entry.GetPermissions()
+	if !setOwner {
+		permissions &^= os.ModeSetuid | os.ModeSetgid
+	}
+
 	// Only set the permission if the file is not a symlink
-	if !entry.IsLink() && (*fileInfo).Mode()&fileModeMask != entry.GetPermissions() {
-		err := os.Chmod(fullPath, entry.GetPermissions())
+	if !entry.IsLink() && (*fileInfo).Mode()&fileModeMask != permissions {
+		err := os.Chmod(fullPath, permissions)
 		if err != nil {
 			LOG_ERROR("RESTORE_CHMOD", "Failed to set the file permissions: %v", err)
 			return false
@@ -596,7 +601,7 @@ func ComparePaths(left string, right string) int {
 	for i := p; i < len(left); i++ {
 		c3 = left[i]
 		if c3 == '/' {
-			last1 = i == len(left) - 1
+			last1 = i == len(left)-1
 			break
 		}
 	}
@@ -606,7 +611,7 @@ func ComparePaths(left string, right string) int {
 	for i := p; i < len(right); i++ {
 		c4 = right[i]
 		if c4 == '/' {
-			last2 = i == len(right) - 1
+			last2 = i == len(right)-1
 			break
 		}
 	}
@@ -705,12 +710,12 @@ func ListEntries(top string, path string, patterns []string, nobackupFile string
 
 	files := make([]os.FileInfo, 0, 1024)
 
-	files, err = ioutil.ReadDir(fullPath)
+	files, err = readDirectory(fullPath)
 	if err != nil {
 		return directoryList, nil, err
 	}
 
-	// This binary search works because ioutil.ReadDir returns files sorted by Name() by default
+	// This binary search works because readDirectory returns files sorted by Name() by default
 	if nobackupFile != "" {
 		ii := sort.Search(len(files), func(ii int) bool { return strings.Compare(files[ii].Name(), nobackupFile) >= 0 })
 		if ii < len(files) && files[ii].Name() == nobackupFile {
@@ -771,11 +776,15 @@ func ListEntries(top string, path string, patterns []string, nobackupFile string
 			}
 		}
 
-		entry.ReadAttributes(top)
-
-		if excludeByAttribute && entry.Attributes != nil && excludedByAttribute(*entry.Attributes) {
-			LOG_DEBUG("LIST_EXCLUDE", "%s is excluded by attribute", entry.Path)
-			continue
+		// Extended attributes are read when the entry is stored in the snapshot rather than here: keeping them for
+		// every entry of a large tree took a lot of memory (on macOS most files have at least one)
+		if excludeByAttribute {
+			entry.ReadAttributes(top)
+			if entry.Attributes != nil && excludedByAttribute(*entry.Attributes) {
+				LOG_DEBUG("LIST_EXCLUDE", "%s is excluded by attribute", entry.Path)
+				continue
+			}
+			entry.Attributes = nil
 		}
 
 		if f.Mode()&(os.ModeNamedPipe|os.ModeSocket|os.ModeDevice) != 0 {
@@ -889,7 +898,7 @@ func DecodeEntryWithHash(decoder *msgpack.Decoder) (*Entry, error) {
 func (entry *Entry) check(chunkLengths []int) error {
 
 	if entry.Size < 0 {
-		return fmt.Errorf("The file %s hash an invalid size (%d)", entry.Path, entry.Size)
+		return fmt.Errorf("The file %s has an invalid size (%d)", entry.Path, entry.Size)
 	}
 
 	if !entry.IsFile() || entry.Size == 0 {

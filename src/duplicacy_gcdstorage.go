@@ -5,20 +5,20 @@
 package duplicacy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
@@ -38,16 +38,20 @@ type GCDStorage struct {
 	service     *drive.Service
 	idCache     map[string]string // only directories are saved in this cache
 	idCacheLock sync.Mutex
-	backoffs    []int // desired backoff time in seconds for each thread
-	attempts    []int // number of failed attempts since last success for each thread
-	driveID     string // the ID of the shared drive or 'root' (GCDUserDrive) if the user's drive
-	spaces      string // 'appDataFolder' if scope is drive.appdata; 'drive' otherwise
+	backoffs    []int      // desired backoff time in seconds for each thread
+	attempts    []int      // number of failed attempts since last success for each thread
+	backoffLock sync.Mutex // guards backoffs and attempts, since ListFiles lists directories in parallel on one thread index
+	driveID     string     // the ID of the shared drive or 'root' (GCDUserDrive) if the user's drive
+	spaces      string     // 'appDataFolder' if scope is drive.appdata; 'drive' otherwise
 
 	createDirectoryLock sync.Mutex
 	isConnected         bool
 	numberOfThreads     int
 	TestMode            bool
 }
+
+// NumberOfThreads returns the number of threads the storage keeps per-thread state for.
+func (storage *GCDStorage) NumberOfThreads() int { return len(storage.backoffs) }
 
 type GCDConfig struct {
 	ClientID     string          `json:"client_id"`
@@ -67,8 +71,10 @@ func (storage *GCDStorage) shouldRetry(threadIndex int, err error) (bool, error)
 	retry := false
 	message := ""
 	if err == nil {
+		storage.backoffLock.Lock()
 		storage.backoffs[threadIndex] = 1
 		storage.attempts[threadIndex] = 0
+		storage.backoffLock.Unlock()
 		return false, nil
 	} else if e, ok := err.(*googleapi.Error); ok {
 		if 500 <= e.Code && e.Code < 600 {
@@ -114,11 +120,13 @@ func (storage *GCDStorage) shouldRetry(threadIndex int, err error) (bool, error)
 		return false, err
 	}
 
+	storage.backoffLock.Lock()
 	if storage.attempts[threadIndex] >= MAX_ATTEMPTS {
 		LOG_INFO("GCD_RETRY", "[%d] Maximum number of retries reached (backoff: %d, attempts: %d)",
 			threadIndex, storage.backoffs[threadIndex], storage.attempts[threadIndex])
 		storage.backoffs[threadIndex] = 1
 		storage.attempts[threadIndex] = 0
+		storage.backoffLock.Unlock()
 		return false, err
 	}
 
@@ -132,6 +140,7 @@ func (storage *GCDStorage) shouldRetry(threadIndex int, err error) (bool, error)
 	delay := float64(storage.backoffs[threadIndex]) * rand.Float64() * 2
 	LOG_DEBUG("GCD_RETRY", "[%d] %s; retrying after %.2f seconds (backoff: %d, attempts: %d)",
 		threadIndex, message, delay, storage.backoffs[threadIndex], storage.attempts[threadIndex])
+	storage.backoffLock.Unlock()
 	time.Sleep(time.Duration(delay * float64(time.Second)))
 
 	return true, nil
@@ -363,7 +372,7 @@ func CreateGCDStorage(tokenFile string, driveID string, storagePath string, thre
 
 	ctx := context.Background()
 
-	description, err := ioutil.ReadFile(tokenFile)
+	description, err := os.ReadFile(tokenFile)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +407,7 @@ func CreateGCDStorage(tokenFile string, driveID string, storagePath string, thre
 		}
 
 		if subject, ok := object["subject"]; ok {
-		    config.Subject = subject.(string)
+			config.Subject = subject.(string)
 		}
 
 		tokenSource = config.TokenSource(ctx)
@@ -416,7 +425,14 @@ func CreateGCDStorage(tokenFile string, driveID string, storagePath string, thre
 		tokenSource = config.TokenSource(ctx, &gcdConfig.Token)
 	}
 
-	service, err := drive.NewService(ctx, option.WithTokenSource(tokenSource))
+	return createGCDStorage(driveID, storagePath, threads, isServiceAccount, scope, option.WithTokenSource(tokenSource))
+}
+
+// createGCDStorage creates a GCD storage object using a client with the given options.
+func createGCDStorage(driveID string, storagePath string, threads int, isServiceAccount bool, scope string,
+	options ...option.ClientOption) (storage *GCDStorage, err error) {
+
+	service, err := drive.NewService(context.Background(), options...)
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +472,6 @@ func CreateGCDStorage(tokenFile string, driveID string, storagePath string, thre
 		storage.backoffs[i] = 1
 		storage.attempts[i] = 0
 	}
-
 
 	if scope == drive.DriveAppdataScope {
 		storage.spaces = "appDataFolder"
@@ -551,7 +566,7 @@ func (storage *GCDStorage) ListFiles(threadIndex int, dir string) ([]string, []i
 		}
 		return files, nil, nil
 	} else {
-		lock := sync.Mutex {}
+		lock := sync.Mutex{}
 		allFiles := []string{}
 		allSizes := []int64{}
 
@@ -574,6 +589,8 @@ func (storage *GCDStorage) ListFiles(threadIndex int, dir string) ([]string, []i
 				go func(parent string) {
 					pathID, ok := storage.findPathID(parent)
 					if !ok {
+						// Every worker must report back, or the loop below waits forever
+						directoryChannel <- ""
 						return
 					}
 					entries, err := storage.listFiles(threadIndex, pathID, true, true)
@@ -584,8 +601,8 @@ func (storage *GCDStorage) ListFiles(threadIndex int, dir string) ([]string, []i
 
 					LOG_DEBUG("GCD_STORAGE", "Listing %s; %d items returned", parent, len(entries))
 
-					files := []string {}
-					sizes := []int64 {}
+					files := []string{}
+					sizes := []int64{}
 					for _, entry := range entries {
 						if entry.MimeType != GCDDirectoryMimeType {
 							name := entry.Name
@@ -599,8 +616,9 @@ func (storage *GCDStorage) ListFiles(threadIndex int, dir string) ([]string, []i
 							files = append(files, name)
 							sizes = append(sizes, entry.Size)
 						} else {
-							directoryChannel <- parent+"/"+entry.Name
+							// Save the id first: the worker listing this directory may start as soon as it's sent
 							storage.savePathID(parent+"/"+entry.Name, entry.Id)
+							directoryChannel <- parent + "/" + entry.Name
 						}
 					}
 					lock.Lock()
@@ -608,14 +626,14 @@ func (storage *GCDStorage) ListFiles(threadIndex int, dir string) ([]string, []i
 					allSizes = append(allSizes, sizes...)
 					lock.Unlock()
 					directoryChannel <- ""
-				} (parent)
+				}(parent)
 			}
 
 			if activeWorkers > 0 {
 				select {
-				case err := <- errorChannel:
+				case err := <-errorChannel:
 					return nil, nil, err
-				case directory := <- directoryChannel:
+				case directory := <-directoryChannel:
 					if directory == "" {
 						activeWorkers--
 					} else {

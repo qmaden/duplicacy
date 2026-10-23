@@ -5,21 +5,20 @@
 package duplicacy
 
 import (
+	"math/rand"
 	"os"
 	"path"
-	"time"
 	"testing"
-	"math/rand"
+	"time"
 )
-
 
 func generateRandomString(length int) string {
 	var letters = []rune("abcdefghijklmnopqrstuvwxyz")
-    b := make([]rune, length)
-    for i := range b {
-        b[i] = letters[rand.Intn(len(letters))]
-    }
-    return string(b)
+	b := make([]rune, length)
+	for i := range b {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+	return string(b)
 }
 
 var fileSizeGenerator = rand.NewZipf(rand.New(rand.NewSource(time.Now().UnixNano())), 1.2, 1.0, 1024)
@@ -35,7 +34,7 @@ func generateRandomChunks(totalFileSize int64) (chunks []string, lengths []int) 
 	for totalChunkSize < totalFileSize {
 		chunks = append(chunks, generateRandomString(64))
 		chunkSize := int64(1 + (rand.Int() % 64))
-		if chunkSize + totalChunkSize > totalFileSize {
+		if chunkSize+totalChunkSize > totalFileSize {
 			chunkSize = totalFileSize - totalChunkSize
 		}
 		lengths = append(lengths, int(chunkSize))
@@ -74,7 +73,7 @@ func testEntryList(t *testing.T, numberOfEntries int, maximumInMemoryEntries int
 	entrySizes := make([]int64, 0)
 
 	for i := 0; i < numberOfEntries; i++ {
-		entry:= CreateEntry(generateRandomString(16), -1, 0, 0700)
+		entry := CreateEntry(generateRandomString(16), -1, 0, 0700)
 		entries = append(entries, entry)
 		entrySizes = append(entrySizes, generateRandomFileSize())
 	}
@@ -88,13 +87,13 @@ func testEntryList(t *testing.T, numberOfEntries int, maximumInMemoryEntries int
 	os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0700)
 
-	os.MkdirAll(testDir + "/list1", 0700)
-	os.MkdirAll(testDir + "/list2", 0700)
-	os.MkdirAll(testDir + "/list3", 0700)
-	os.MkdirAll(testDir + "/list1", 0700)
+	os.MkdirAll(testDir+"/list1", 0700)
+	os.MkdirAll(testDir+"/list2", 0700)
+	os.MkdirAll(testDir+"/list3", 0700)
+	os.MkdirAll(testDir+"/list1", 0700)
 
 	// For the first entry list, all entries are new
-	entryList, _ := CreateEntryList("test", testDir + "/list1", maximumInMemoryEntries)
+	entryList, _ := CreateEntryList("test", testDir+"/list1", maximumInMemoryEntries)
 	for _, entry := range entries {
 		entryList.AddEntry(entry)
 	}
@@ -125,7 +124,7 @@ func testEntryList(t *testing.T, numberOfEntries int, maximumInMemoryEntries int
 
 	// For the second entry list, half of the entries are new
 	for i := range entries {
-		if rand.Int() % 1 == 0 {
+		if rand.Int()%1 == 0 {
 			entries[i].Size = -1
 		} else {
 			entries[i].Size = entrySizes[i]
@@ -133,7 +132,7 @@ func testEntryList(t *testing.T, numberOfEntries int, maximumInMemoryEntries int
 	}
 
 	preservedChunks, preservedChunkLengths := getPreservedChunks(entries, uploadedChunks, uploadedChunksLengths)
-	entryList, _ = CreateEntryList("test", testDir + "/list2", maximumInMemoryEntries)
+	entryList, _ = CreateEntryList("test", testDir+"/list2", maximumInMemoryEntries)
 	for _, entry := range entries {
 		entryList.AddEntry(entry)
 	}
@@ -143,7 +142,7 @@ func testEntryList(t *testing.T, numberOfEntries int, maximumInMemoryEntries int
 
 	totalFileSize = 0
 	for i := range entryList.ModifiedEntries {
-		fileSize := generateRandomFileSize()		
+		fileSize := generateRandomFileSize()
 		entryList.ModifiedEntries[i].Size = fileSize
 		totalFileSize += fileSize
 	}
@@ -170,7 +169,6 @@ func testEntryList(t *testing.T, numberOfEntries int, maximumInMemoryEntries int
 	}
 
 }
-
 
 func TestEntryList(t *testing.T) {
 	testEntryList(t, 1024, 1024)

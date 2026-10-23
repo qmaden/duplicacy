@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"runtime/debug"
@@ -42,7 +41,12 @@ func loadStorage(localStoragePath string, threads int) (Storage, error) {
 		return storage, err
 	}
 
-	description, err := ioutil.ReadFile("test_storage.conf")
+	// In-process fakes of cloud services; one server per process, shared like a real remote storage
+	if storage, err := loadFakeCloudStorage(threads); storage != nil || err != nil {
+		return storage, err
+	}
+
+	description, err := os.ReadFile("test_storage.conf")
 	if err != nil {
 		return nil, err
 	}
@@ -649,7 +653,7 @@ func TestCleanStorage(t *testing.T) {
 
 func TestMetadataChunkNesting(t *testing.T) {
 
-	storageDir, err := ioutil.TempDir("", "duplicacy_metadata_nesting")
+	storageDir, err := os.MkdirTemp("", "duplicacy_metadata_nesting")
 	if err != nil {
 		t.Fatalf("Failed to create a temporary directory: %v", err)
 	}

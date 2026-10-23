@@ -1,0 +1,49 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems: please don't report them here. See SECURITY.md.
+        Remove passwords, keys, tokens and bucket names from logs before posting.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The VERSION line of `duplicacy -h`, or the commit you built
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [Linux x86-64, macOS (Apple Silicon), macOS (Intel), Other]
+    validations:
+      required: true
+  - type: input
+    id: storage
+    attributes:
+      label: Storage backend
+      placeholder: e.g. local disk, sftp, s3, b2
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and options
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log output
+      description: Run the command with `-log -d` and paste the relevant part
+      render: text

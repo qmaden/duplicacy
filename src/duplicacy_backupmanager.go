@@ -7,7 +7,6 @@ package duplicacy
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -21,7 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
-    "github.com/vmihailenco/msgpack"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // BackupManager performs the two major operations, backup and restore, and passes other operations, mostly related to
@@ -36,11 +35,13 @@ type BackupManager struct {
 
 	config *Config // contains a number of options
 
-	nobackupFile string // don't backup directory when this file name is found
-	filtersFile string  // the path to the filters file
-	excludeByAttribute bool // don't backup file based on file attribute
+	nobackupFile       string // don't backup directory when this file name is found
+	filtersFile        string // the path to the filters file
+	excludeByAttribute bool   // don't backup file based on file attribute
 
 	cachePath string
+
+	SkippedEntries int // files and directories skipped by the last backup because of access errors
 }
 
 func (manager *BackupManager) SetDryRun(dryRun bool) {
@@ -108,8 +109,13 @@ func (manager *BackupManager) SetupSnapshotCache(storageName string) bool {
 		return false
 	}
 
+	// The cache holds decrypted metadata (file names, sizes and hashes), so only the owner may read it
+	if err = storage.makePrivate(); err != nil {
+		LOG_WARN("BACKUP_CACHE", "Failed to restrict the permissions of the snapshot cache: %v", err)
+	}
+
 	for _, subdir := range []string{"chunks", "snapshots"} {
-		err := os.Mkdir(path.Join(cacheDir, subdir), 0744)
+		err := os.Mkdir(path.Join(cacheDir, subdir), 0700)
 		if err != nil && !os.IsExist(err) {
 			LOG_ERROR("BACKUP_CACHE", "Failed to create the snapshot cache subdir: %v", err)
 			return false
@@ -146,7 +152,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 
 	if manager.config.DataShards != 0 && manager.config.ParityShards != 0 {
 		LOG_INFO("BACKUP_ERASURECODING", "Erasure coding is enabled with %d data shards and %d parity shards",
-		         manager.config.DataShards, manager.config.ParityShards)
+			manager.config.DataShards, manager.config.ParityShards)
 	}
 
 	if manager.config.rsaPublicKey != nil && len(manager.config.FileKey) > 0 {
@@ -168,15 +174,17 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 	hashMode := remoteSnapshot.Revision == 0 || !quickMode
 
 	// This cache contains all chunks referenced by last snasphot. Any other chunks will lead to a call to
-	// UploadChunk.
+	// UploadChunk.  It is keyed by the chunk directory followed by the chunk id: when metadata chunks are stored
+	// separately, a metadata chunk doesn't make a file chunk with the same id exist, and vice versa.
 	chunkCache := make(map[string]bool)
+	fileChunkDir := manager.storage.GetChunkDirectory(false)
 
 	// A revision number of 0 means this is the initial backup
 	if remoteSnapshot.Revision > 0 {
 		manager.SnapshotManager.DownloadSnapshotSequences(remoteSnapshot)
 		// Add all chunks in the last snapshot to the cache
-		for _, chunkID := range manager.SnapshotManager.GetSnapshotChunks(remoteSnapshot, true) {
-			chunkCache[chunkID] = true
+		for chunkID, isMetadata := range manager.SnapshotManager.GetSnapshotChunkMap(remoteSnapshot, true) {
+			chunkCache[manager.storage.GetChunkDirectory(isMetadata)+chunkID] = true
 		}
 	}
 
@@ -187,7 +195,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 
 	// If the listing operation is fast and this is an initial backup, list all chunks and
 	// put them in the cache.
-	if (manager.storage.IsFastListing() && remoteSnapshot.Revision == 0) {
+	if manager.storage.IsFastListing() && remoteSnapshot.Revision == 0 {
 		LOG_INFO("BACKUP_LIST", "Listing all chunks")
 		allChunks, _ := manager.SnapshotManager.ListAllFiles(manager.storage, chunkDir)
 
@@ -201,12 +209,23 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			}
 
 			chunk = strings.Replace(chunk, "/", "", -1)
-			chunkCache[chunk] = true
+			chunkCache[chunkDir+chunk] = true
 		}
 
 		// Make sure that all chunks in the incomplete snapshot must exist in the storage
-		if incompleteSnapshot != nil && !incompleteSnapshot.CheckChunks(manager.config, chunkCache) {
+		if incompleteSnapshot != nil && !incompleteSnapshot.CheckChunks(manager.config, func(chunkID string) bool {
+			return chunkCache[fileChunkDir+chunkID]
+		}) {
 			LOG_WARN("INCOMPLETE_DISCARD", "The incomplete snapshot can't be used as it contains chunks not in the storage")
+			incompleteSnapshot.CloseOnDiskFile()
+			incompleteSnapshot = nil
+		}
+	} else if incompleteSnapshot != nil {
+		// The chunks uploaded by the interrupted backup belong to no snapshot, so prune may have removed them since;
+		// reusing them without checking would produce a snapshot that references missing chunks
+		if !manager.incompleteChunksExist(incompleteSnapshot, chunkCache, fileChunkDir, threads) {
+			LOG_WARN("INCOMPLETE_DISCARD", "The incomplete snapshot can't be used as it contains chunks not in the storage")
+			incompleteSnapshot.CloseOnDiskFile()
 			incompleteSnapshot = nil
 		}
 	}
@@ -222,7 +241,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 
 	var totalModifiedFileSize int64    // total size of modified files
 	var uploadedModifiedFileSize int64 // portions that have been uploaded (including cache hits)
-	var preservedFileSize int64 // total size of unmodified files
+	var preservedFileSize int64        // total size of unmodified files
 
 	localSnapshot := CreateEmptySnapshot(manager.snapshotID)
 	localSnapshot.Revision = remoteSnapshot.Revision + 1
@@ -239,7 +258,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 		// List local files
 		defer CatchLogException()
 		localSnapshot.ListLocalFiles(shadowTop, manager.nobackupFile, manager.filtersFile, manager.excludeByAttribute, localListingChannel, &skippedDirectories, &skippedFiles)
-	} ()
+	}()
 
 	go func() {
 		// List remote files
@@ -261,7 +280,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			})
 		}
 		close(remoteListingChannel)
-	} ()
+	}()
 
 	// Create the local file list
 	localEntryList, err := CreateEntryList(manager.snapshotID, manager.cachePath, maximumInMemoryEntries)
@@ -275,7 +294,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 	var remoteEntry *Entry
 	remoteListingOK := true
 	for {
-		localEntry := <- localListingChannel
+		localEntry := <-localListingChannel
 		if localEntry == nil {
 			break
 		}
@@ -289,7 +308,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 				compareResult = localEntry.Compare(remoteEntry)
 			} else {
 				if remoteListingOK {
-					remoteEntry, remoteListingOK = <- remoteListingChannel
+					remoteEntry, remoteListingOK = <-remoteListingChannel
 				}
 				if !remoteListingOK {
 					compareResult = -1
@@ -304,7 +323,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			remoteEntry = nil
 		}
 
-		if compareResult == 0  {
+		if compareResult == 0 {
 			// No need to check if it is in hash mode -- in that case remote listing is nil
 			if localEntry.IsSameAs(remoteEntry) && localEntry.IsFile() {
 				if localEntry.Size > 0 {
@@ -339,8 +358,8 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			// compareResult must be < 0; the local file is new
 			totalModifiedFileSize += localEntry.Size
 			if localEntry.Size > 0 {
-					// A size of -1 indicates this is a modified file that will be uploaded
-					localEntry.Size = -1
+				// A size of -1 indicates this is a modified file that will be uploaded
+				localEntry.Size = -1
 			}
 		}
 
@@ -357,6 +376,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 	}
 
 	fileChunkMaker := CreateFileChunkMaker(manager.config, false)
+	fileChunkMaker.deferHashing = true
 
 	keepUploadAlive := int64(1800)
 
@@ -438,30 +458,31 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 
 	chunkOperator.UploadCompletionFunc = uploadChunkCompletionFunc
 
+	// Chunks are hashed and checked against the chunk cache on the upload goroutines; chunkCacheLock guards the
+	// cache and lastUploadingTime until all file chunks are done
+	var chunkCacheLock sync.Mutex
+	chunkOperator.UploadFilter = func(chunk *Chunk) bool {
+		key := fileChunkDir + chunk.GetID()
+		chunkCacheLock.Lock()
+		defer chunkCacheLock.Unlock()
+
+		_, found := chunkCache[key]
+		if found && time.Now().Unix()-lastUploadingTime > keepUploadAlive {
+			LOG_INFO("UPLOAD_KEEPALIVE", "Skip chunk cache to keep connection alive")
+			found = false
+		}
+		if !found {
+			lastUploadingTime = time.Now().Unix()
+			chunkCache[key] = true
+		}
+		return found
+	}
+
 	chunkIndex := -1
 	// This function is called when the chunk maker generates a new chunk
 	uploadChunkFunc := func(chunk *Chunk) {
-		chunkID := chunk.GetID()
-		chunkSize := chunk.GetLength()
-
 		chunkIndex++
-
-		_, found := chunkCache[chunkID]
-		if found {
-			if time.Now().Unix() - lastUploadingTime > keepUploadAlive {
-				LOG_INFO("UPLOAD_KEEPALIVE", "Skip chunk cache to keep connection alive")
-				found = false
-			}
-		}
-
-		if found {
-			uploadChunkCompletionFunc(chunk, chunkIndex, true, chunkSize, 0)
-		} else {
-			lastUploadingTime = time.Now().Unix()
-			chunkCache[chunkID] = true
-
-			chunkOperator.Upload(chunk, chunkIndex, false)
-		}
+		chunkOperator.UploadUnhashed(chunk, chunkIndex)
 
 		if chunkIndex == chunkToFail {
 			LOG_ERROR("SNAPSHOT_FAIL", "Artificially fail the chunk %d for testing purposes", chunkToFail)
@@ -479,7 +500,13 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			skippedFiles = append(skippedFiles, entry.Path)
 			continue
 		}
-		entry.Size, entry.Hash = fileChunkMaker.AddData(file, uploadChunkFunc)
+		if info, err := file.Stat(); err == nil && info.Size() >= readAheadThreshold {
+			readAhead := newReadAheadReader(file, manager.config.NewFileHasher())
+			entry.Size, entry.Hash = fileChunkMaker.AddData(readAhead, uploadChunkFunc)
+			readAhead.Close()
+		} else {
+			entry.Size, entry.Hash = fileChunkMaker.AddData(file, uploadChunkFunc)
+		}
 		if !showStatistics || IsTracing() || RunInBackground {
 			LOG_INFO("PACK_END", "Packed %s (%d)", entry.Path, entry.Size)
 		}
@@ -526,7 +553,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 
 	totalMetadataChunkLength, numberOfNewMetadataChunks,
 		totalUploadedMetadataChunkLength, totalUploadedMetadataChunkBytes :=
-		manager.UploadSnapshot(chunkOperator, top, localSnapshot, localEntryList, chunkCache, metadataChunkSize)
+		manager.UploadSnapshot(chunkOperator, shadowTop, localSnapshot, localEntryList, chunkCache, metadataChunkSize)
 
 	if showStatistics && !RunInBackground {
 		for _, entry := range localEntryList.ModifiedEntries {
@@ -558,7 +585,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 	if showStatistics {
 
 		LOG_INFO("BACKUP_STATS", "Files: %d total, %s bytes; %d new, %s bytes",
-			localEntryList.NumberOfEntries - int64(len(skippedFiles)),
+			localEntryList.NumberOfEntries-int64(len(skippedFiles)),
 			PrettyNumber(preservedFileSize+uploadedFileSize),
 			len(localEntryList.ModifiedEntries), PrettyNumber(uploadedFileSize))
 
@@ -606,6 +633,8 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 		}
 	}
 
+	manager.SkippedEntries = len(skippedDirectories) + len(skippedFiles)
+
 	if len(skipped) > 0 {
 		if len(skippedDirectories)+len(skippedFiles) == 1 {
 			skipped += " was"
@@ -622,6 +651,64 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 	return true
 }
 
+// isPathInside returns true if 'child' is 'parent' or inside it.  A plain string prefix test would also match
+// siblings such as '/data/ab' for '/data/a'.
+func isPathInside(child string, parent string) bool {
+	relative, err := filepath.Rel(parent, child)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// incompleteChunksExist checks that the chunks referenced by an incomplete snapshot still exist.  Chunks
+// referenced by the latest snapshot ('chunkCache') are known to exist; the others are looked up in parallel.
+func (manager *BackupManager) incompleteChunksExist(incompleteSnapshot *EntryList, chunkCache map[string]bool,
+	fileChunkDir string, threads int) bool {
+
+	var unknown []string
+	seen := make(map[string]bool)
+	for _, hashes := range [][]string{incompleteSnapshot.UploadedChunkHashes, incompleteSnapshot.PreservedChunkHashes} {
+		for _, hash := range hashes {
+			chunkID := manager.config.GetChunkIDFromHash(hash)
+			if !chunkCache[fileChunkDir+chunkID] && !seen[chunkID] {
+				seen[chunkID] = true
+				unknown = append(unknown, chunkID)
+			}
+		}
+	}
+	if len(unknown) == 0 {
+		return true
+	}
+	LOG_INFO("INCOMPLETE_CHECK", "Checking %d chunks uploaded by the interrupted backup", len(unknown))
+
+	if threads < 1 {
+		threads = 1
+	}
+	var missing int32
+	var wg sync.WaitGroup
+	chunkIDs := make(chan string)
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func(threadIndex int) {
+			defer wg.Done()
+			for chunkID := range chunkIDs {
+				if atomic.LoadInt32(&missing) > 0 {
+					continue
+				}
+				_, exist, _, err := manager.storage.FindChunk(threadIndex, chunkID, false, false)
+				if err != nil || !exist {
+					LOG_DEBUG("INCOMPLETE_CHECK", "Chunk %s from the incomplete snapshot is missing: %v", chunkID, err)
+					atomic.AddInt32(&missing, 1)
+				}
+			}
+		}(i)
+	}
+	for _, chunkID := range unknown {
+		chunkIDs <- chunkID
+	}
+	close(chunkIDs)
+	wg.Wait()
+	return missing == 0
+}
+
 // Restore downloads the specified snapshot, compares it with what's on the repository, and then downloads
 // files that are different. 'base' is a directory that contains files at a different revision which can
 // serve as a local cache to avoid download chunks available locally.  It is perfectly ok for 'base' to be
@@ -635,7 +722,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	LOG_DEBUG("RESTORE_PARAMETERS", "top: %s, revision: %d, in-place: %t, quick: %t, delete: %t",
 		top, revision, inPlace, quickMode, deleteMode)
 
-	if !strings.HasPrefix(GetDuplicacyPreferencePath(), top) {
+	if !isPathInside(GetDuplicacyPreferencePath(), top) {
 		LOG_INFO("RESTORE_INPLACE", "Forcing in-place mode with a non-default preference path")
 		inPlace = true
 	}
@@ -655,7 +742,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 		}
 	}
 
-	err = os.Mkdir(path.Join(top, DUPLICACY_DIRECTORY), 0744)
+	err = os.Mkdir(path.Join(top, DUPLICACY_DIRECTORY), 0700)
 	if err != nil && !os.IsExist(err) {
 		LOG_ERROR("RESTORE_MKDIR", "Failed to create the preference directory: %v", err)
 		return 0
@@ -686,7 +773,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 		// List local files
 		defer CatchLogException()
 		localSnapshot.ListLocalFiles(top, manager.nobackupFile, manager.filtersFile, manager.excludeByAttribute, localListingChannel, nil, nil)
-	} ()
+	}()
 
 	remoteSnapshot := manager.SnapshotManager.DownloadSnapshot(manager.snapshotID, revision)
 	manager.SnapshotManager.DownloadSnapshotSequences(remoteSnapshot)
@@ -698,23 +785,35 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			return true
 		})
 		close(remoteListingChannel)
-	} ()
+	}()
 
 	var localEntry *Entry
 	localListingOK := true
 
+	// Entry paths come from the storage; this makes sure nothing is written outside 'top'
+	guard := newRestorePathGuard(top)
+
+	// Directories excluded by the patterns, whose attributes are still applied if anything inside them is restored
+	filteredDirectories := make(map[string]*Entry)
+	// Entries that were restored or checked, whose filtered ancestors need their attributes
+	var restoredPaths []string
+
 	for remoteEntry := range remoteListingChannel {
 
 		if len(patterns) > 0 && !MatchPath(remoteEntry.Path, patterns) {
+			if remoteEntry.IsDir() {
+				filteredDirectories[remoteEntry.Path] = remoteEntry
+			}
 			continue
 		}
+		restoredPaths = append(restoredPaths, remoteEntry.Path)
 
 		// remoteEntry is valid; now find the matching localEntry
 		var compareResult int
 
 		for {
 			if localEntry == nil && localListingOK {
-				localEntry, localListingOK = <- localListingChannel
+				localEntry, localListingOK = <-localListingChannel
 			}
 			if localEntry == nil {
 				compareResult = 1
@@ -740,7 +839,13 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			localEntry = nil
 		}
 
-		fullPath := joinPath(top, remoteEntry.Path)
+		fullPath, err := guard.path(remoteEntry.Path)
+		if err != nil {
+			LOG_WARN("RESTORE_UNSAFE_PATH", "Skipped %s: %v", remoteEntry.Path, err)
+			failedFileCount++
+			continue
+		}
+
 		if remoteEntry.IsLink() {
 			stat, err := os.Lstat(fullPath)
 			if stat != nil {
@@ -756,6 +861,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			}
 
 			err = os.Symlink(remoteEntry.Link, fullPath)
+			guard.invalidate(remoteEntry.Path)
 			if err != nil {
 				LOG_ERROR("RESTORE_SYMLINK", "Can't create symlink %s: %v", remoteEntry.Path, err)
 				return 0
@@ -764,11 +870,39 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			LOG_TRACE("DOWNLOAD_DONE", "Symlink %s updated", remoteEntry.Path)
 		} else if remoteEntry.IsDir() {
 
-			stat, err := os.Stat(fullPath)
+			stat, err := os.Lstat(fullPath)
 
-			if err == nil && !stat.IsDir() {
-				LOG_ERROR("RESTORE_NOTDIR", "The path %s is not a directory", fullPath)
-				return 0
+			if err == nil && stat.Mode()&os.ModeSymlink != 0 {
+				// Never follow a symbolic link where the snapshot has a directory
+				if !overwrite {
+					LOG_WARN("RESTORE_SYMLINK", "Skipped %s: the path is a symbolic link; specify -overwrite to replace it with a directory",
+						remoteEntry.Path)
+					failedFileCount++
+					continue
+				}
+				LOG_INFO("RESTORE_SYMLINK", "Replacing the symbolic link %s with a directory", remoteEntry.Path)
+				err = os.Remove(fullPath)
+				guard.invalidate(remoteEntry.Path)
+				if err != nil {
+					LOG_ERROR("RESTORE_SYMLINK", "Failed to remove the symbolic link %s: %v", fullPath, err)
+					return 0
+				}
+				_, err = os.Lstat(fullPath)
+			} else if err == nil && !stat.IsDir() {
+				// The path was a file and is a directory in the snapshot (upstream #429)
+				if !overwrite {
+					LOG_WARN("RESTORE_NOTDIR", "Skipped %s: the path is not a directory; specify -overwrite to replace it",
+						remoteEntry.Path)
+					failedFileCount++
+					continue
+				}
+				LOG_INFO("RESTORE_NOTDIR", "Replacing the file %s with a directory", remoteEntry.Path)
+				if err = os.Remove(fullPath); err != nil {
+					LOG_ERROR("RESTORE_NOTDIR", "Failed to remove %s: %v", fullPath, err)
+					return 0
+				}
+				guard.invalidate(remoteEntry.Path)
+				_, err = os.Lstat(fullPath)
 			}
 
 			if os.IsNotExist(err) {
@@ -793,7 +927,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	}
 
 	for localListingOK {
-		localEntry, localListingOK = <- localListingChannel
+		localEntry, localListingOK = <-localListingChannel
 		if localEntry != nil {
 			extraFiles = append(extraFiles, localEntry.Path)
 		}
@@ -826,16 +960,63 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 
 	chunkDownloader.AddFiles(remoteSnapshot, fileEntries)
 
+	// Every chunk of a file that doesn't exist yet must be downloaded; knowing this up front lets the downloader
+	// prefetch them before the file's turn comes
+	for _, file := range fileEntries {
+		if file.Size > 0 {
+			if _, err := os.Lstat(joinPath(top, file.Path)); os.IsNotExist(err) {
+				chunkDownloader.MarkNeeded(file)
+			}
+		}
+	}
+
 	chunkMaker := CreateFileChunkMaker(manager.config, true)
 
 	startDownloadingTime := time.Now().Unix()
 
+	metadataPool := newRestoreMetadataPool(restoreMetadataWorkers, setOwner)
+	defer metadataPool.wait()
+
 	// Now download files one by one
 	for _, file := range fileEntries {
 
-		fullPath := joinPath(top, file.Path)
-		stat, _ := os.Stat(fullPath)
-		if stat != nil {
+		// Check the path again: symbolic links may have been created since the entry was listed
+		fullPath, err := guard.path(file.Path)
+		if err != nil {
+			LOG_WARN("RESTORE_UNSAFE_PATH", "Skipped %s: %v", file.Path, err)
+			failedFileCount++
+			continue
+		}
+
+		stat, _ := os.Lstat(fullPath)
+		if stat != nil && stat.IsDir() {
+			// The path was a directory and is a file in the snapshot (upstream #429).  A directory is only removed
+			// with -overwrite, and only if it is empty unless -delete would remove its contents anyway.
+			if !overwrite {
+				LOG_WARN("RESTORE_NOTFILE", "Skipped %s: the path is a directory; specify -overwrite to replace it", file.Path)
+				failedFileCount++
+				continue
+			}
+			if deleteMode && len(patterns) == 0 {
+				err = os.RemoveAll(fullPath)
+			} else {
+				err = os.Remove(fullPath)
+			}
+			guard.invalidate(file.Path)
+			if err != nil {
+				LOG_WARN("RESTORE_NOTFILE", "Skipped %s: failed to remove the directory in its place (specify -delete to remove "+
+					"a directory that isn't empty): %v", file.Path, err)
+				failedFileCount++
+				continue
+			}
+			LOG_INFO("RESTORE_NOTFILE", "Replaced the directory %s with a file", file.Path)
+			stat = nil
+		}
+		if stat != nil && stat.Mode()&os.ModeSymlink != 0 {
+			// A symbolic link is never the same as the file; RestoreFile replaces it (with -overwrite) without
+			// following it
+			stat = nil
+		} else if stat != nil {
 			if quickMode {
 				if file.IsSameAsFileInfo(stat) {
 					LOG_TRACE("RESTORE_SKIP", "File %s unchanged (by size and timestamp)", file.Path)
@@ -861,6 +1042,17 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 
 		// Handle zero size files.
 		if file.Size == 0 {
+			if isSymlink(fullPath) {
+				if !overwrite {
+					LOG_WARN("RESTORE_SYMLINK", "Skipped %s: the path is a symbolic link; specify -overwrite to replace it", file.Path)
+					failedFileCount++
+					continue
+				}
+				if err = os.Remove(fullPath); err != nil {
+					LOG_ERROR("RESTORE_SYMLINK", "Failed to remove the symbolic link %s: %v", fullPath, err)
+					return 0
+				}
+			}
 			newFile, err := os.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.GetPermissions())
 			if err != nil {
 				LOG_ERROR("DOWNLOAD_OPEN", "Failed to create empty file: %v", err)
@@ -868,7 +1060,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			}
 			newFile.Close()
 
-			file.RestoreMetadata(fullPath, nil, setOwner)
+			metadataPool.restore(file, fullPath)
 			if !showStatistics {
 				LOG_INFO("DOWNLOAD_DONE", "Downloaded %s (0)", file.Path)
 				downloadedFileSize += file.Size
@@ -898,13 +1090,26 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			skippedFileSize += file.Size
 			skippedFileCount++
 		}
-		file.RestoreMetadata(fullPath, nil, setOwner)
+		metadataPool.restore(file, fullPath)
 	}
 
+	// Directory attributes and deletions below must come after all file attributes are set
+	metadataPool.wait()
+
 	if deleteMode && len(patterns) == 0 {
+		// A path that changed between a file and a directory is both an extra local entry and an entry of the
+		// snapshot; it has just been restored and must not be deleted
+		inSnapshot := make(map[string]bool)
+		for _, restoredPath := range restoredPaths {
+			inSnapshot[strings.TrimSuffix(restoredPath, "/")] = true
+		}
+
 		// Reverse the order to make sure directories are empty before being deleted
 		for i := range extraFiles {
 			file := extraFiles[len(extraFiles)-1-i]
+			if inSnapshot[strings.TrimSuffix(file, "/")] {
+				continue
+			}
 			fullPath := joinPath(top, file)
 			os.Remove(fullPath)
 			LOG_INFO("RESTORE_DELETE", "Deleted %s", file)
@@ -912,8 +1117,33 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	}
 
 	for _, entry := range directoryEntries {
-		dir := joinPath(top, entry.Path)
+		dir, err := guard.path(entry.Path)
+		if err != nil || isSymlink(dir) {
+			LOG_WARN("RESTORE_UNSAFE_PATH", "Skipped the attributes of %s: %v", entry.Path, err)
+			continue
+		}
 		entry.RestoreMetadata(dir, nil, setOwner)
+	}
+
+	// With patterns, the directories leading to restored entries were created with default attributes; give them
+	// the attributes from the snapshot (upstream #84)
+	appliedDirectories := make(map[string]bool)
+	for _, restoredPath := range restoredPaths {
+		for parent := (&Entry{Path: restoredPath}).GetParent(); parent != ""; parent = (&Entry{Path: parent}).GetParent() {
+			directoryPath := parent + "/"
+			entry, found := filteredDirectories[directoryPath]
+			if !found || appliedDirectories[directoryPath] {
+				continue
+			}
+			appliedDirectories[directoryPath] = true
+			dir, err := guard.path(directoryPath)
+			if err != nil || isSymlink(dir) {
+				continue
+			}
+			if _, err = os.Lstat(dir); err == nil {
+				entry.RestoreMetadata(dir, nil, setOwner)
+			}
+		}
 	}
 
 	if showStatistics {
@@ -946,53 +1176,52 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	return 0
 }
 
-// fileEncoder encodes one file at a time to avoid loading the full json description of the entire file tree
-// in the memory
-type fileEncoder struct {
-	top            string
-	readAttributes bool
-	files          []*Entry
-	currentIndex   int
-	buffer         *bytes.Buffer
+// Number of goroutines that set the attributes of restored files
+const restoreMetadataWorkers = 8
+
+// restoreMetadataPool sets the permissions, owner, times and extended attributes of restored files on several
+// goroutines.  File contents must be written in the order of the chunk stream, but these system calls, about a
+// fifth of the time of restoring many small files, are independent for each file.
+type restoreMetadataPool struct {
+	tasks    chan restoreMetadataTask
+	done     sync.WaitGroup
+	finished bool
 }
 
-// Read reads data from the embedded buffer
-func (encoder fileEncoder) Read(data []byte) (n int, err error) {
-	return encoder.buffer.Read(data)
+type restoreMetadataTask struct {
+	entry    *Entry
+	fullPath string
 }
 
-// NextFile switches to the next file and generates its json description in the buffer.  It also takes care of
-// the ending ']' and the commas between files.
-func (encoder *fileEncoder) NextFile() (io.Reader, bool) {
-	if encoder.currentIndex == len(encoder.files) {
-		return nil, false
+func newRestoreMetadataPool(workers int, setOwner bool) *restoreMetadataPool {
+	pool := &restoreMetadataPool{tasks: make(chan restoreMetadataTask, workers*4)}
+	pool.done.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer pool.done.Done()
+			// RestoreMetadata reports failures with LOG_ERROR, which ends the restore as on the main goroutine
+			defer CatchLogException()
+			for task := range pool.tasks {
+				task.entry.RestoreMetadata(task.fullPath, nil, setOwner)
+			}
+		}()
 	}
-	if encoder.currentIndex == len(encoder.files)-1 {
-		encoder.buffer.Write([]byte("]"))
-		encoder.currentIndex++
-		return encoder, true
-	}
+	return pool
+}
 
-	encoder.currentIndex++
-	entry := encoder.files[encoder.currentIndex]
-	if encoder.readAttributes {
-		entry.ReadAttributes(encoder.top)
-	}
-	description, err := json.Marshal(entry)
-	if err != nil {
-		LOG_FATAL("SNAPSHOT_ENCODE", "Failed to encode file %s: %v", encoder.files[encoder.currentIndex].Path, err)
-		return nil, false
-	}
+// restore queues the attributes of 'entry' to be applied to the file at 'fullPath'.
+func (pool *restoreMetadataPool) restore(entry *Entry, fullPath string) {
+	pool.tasks <- restoreMetadataTask{entry: entry, fullPath: fullPath}
+}
 
-	if encoder.readAttributes {
-		entry.Attributes = nil
+// wait returns once all queued attributes are applied.  It may be called more than once; no tasks can be added
+// after the first call.
+func (pool *restoreMetadataPool) wait() {
+	if !pool.finished {
+		pool.finished = true
+		close(pool.tasks)
 	}
-
-	if encoder.currentIndex != 0 {
-		encoder.buffer.Write([]byte(","))
-	}
-	encoder.buffer.Write(description)
-	return encoder, true
+	pool.done.Wait()
 }
 
 // UploadSnapshot uploads the specified snapshot to the storage. It turns Files, ChunkHashes, and ChunkLengths into
@@ -1031,11 +1260,12 @@ func (manager *BackupManager) UploadSnapshot(chunkOperator *ChunkOperator, top s
 		chunkIndex++
 		totalMetadataChunkSize += int64(chunkSize)
 
-		_, found := chunkCache[chunkID]
+		cacheKey := manager.storage.GetChunkDirectory(true) + chunkID
+		_, found := chunkCache[cacheKey]
 		if found {
 			uploadCompletionFunc(chunk, chunkIndex, true, chunkSize, 0)
 		} else {
-			chunkCache[chunkID] = true
+			chunkCache[cacheKey] = true
 			chunkOperator.Upload(chunk, chunkIndex, true)
 		}
 
@@ -1046,7 +1276,7 @@ func (manager *BackupManager) UploadSnapshot(chunkOperator *ChunkOperator, top s
 	encoder := msgpack.NewEncoder(buffer)
 	metadataChunkMaker := CreateMetaDataChunkMaker(manager.config, metadataChunkSize)
 
-    var chunkHashes  []string
+	var chunkHashes []string
 	var chunkLengths []int
 	lastChunk := -1
 
@@ -1077,8 +1307,11 @@ func (manager *BackupManager) UploadSnapshot(chunkOperator *ChunkOperator, top s
 			entry.EndChunk = delta
 		}
 
+		// Extended attributes are only read now, from the same tree the files were read from
+		entry.ReadAttributes(top)
 		buffer.Reset()
 		err := encoder.Encode(entry)
+		entry.Attributes = nil
 		if err != nil {
 			LOG_ERROR("SNAPSHOT_UPLOAD", "Metadata for %s can't be encoded: %v", entry.Path, err)
 			return err
@@ -1143,9 +1376,10 @@ func (manager *BackupManager) UploadSnapshot(chunkOperator *ChunkOperator, top s
 // Restore downloads a file from the storage.  If 'inPlace' is false, the download file is saved first to a temporary
 // file under the .duplicacy directory and then replaces the existing one.  Otherwise, the existing file will be
 // overwritten directly.
-// Return: true, nil:    Restored file; 
-//         false, nil:   Skipped file; 
-//         false, error: Failure to restore file (only if allowFailures == true)
+// Return: true, nil:    Restored file;
+//
+//	false, nil:   Skipped file;
+//	false, error: Failure to restore file (only if allowFailures == true)
 func (manager *BackupManager) RestoreFile(chunkDownloader *ChunkDownloader, chunkMaker *ChunkMaker, entry *Entry, top string, inPlace bool, overwrite bool,
 	showStatistics bool, totalFileSize int64, downloadedFileSize int64, startTime int64, allowFailures bool) (bool, error) {
 
@@ -1157,6 +1391,20 @@ func (manager *BackupManager) RestoreFile(chunkDownloader *ChunkDownloader, chun
 	preferencePath := GetDuplicacyPreferencePath()
 	temporaryPath := path.Join(preferencePath, "temporary")
 	fullPath := joinPath(top, entry.Path)
+
+	// Opening the path would follow a symbolic link and read or write its target, which may be anywhere
+	if isSymlink(fullPath) {
+		if !overwrite {
+			LOG_WERROR(allowFailures, "DOWNLOAD_OVERWRITE",
+				"%s is a symbolic link.  Please specify the -overwrite option to replace it", entry.Path)
+			return false, fmt.Errorf("symbolic link exists")
+		}
+		LOG_INFO("RESTORE_SYMLINK", "Replacing the symbolic link %s with a file", entry.Path)
+		if err := os.Remove(fullPath); err != nil {
+			LOG_ERROR("RESTORE_SYMLINK", "Failed to remove the symbolic link %s: %v", fullPath, err)
+			return false, nil
+		}
+	}
 
 	defer func() {
 		if existingFile != nil {
@@ -1320,7 +1568,7 @@ func (manager *BackupManager) RestoreFile(chunkDownloader *ChunkDownloader, chun
 			// fileHash != entry.Hash, warn/error depending on -overwrite option
 			if !overwrite && !isNewFile {
 				LOG_WERROR(allowFailures, "DOWNLOAD_OVERWRITE",
-							"File %s already exists.  Please specify the -overwrite option to overwrite", entry.Path)
+					"File %s already exists.  Please specify the -overwrite option to overwrite", entry.Path)
 				return false, fmt.Errorf("file exists")
 			}
 
@@ -1463,7 +1711,10 @@ func (manager *BackupManager) RestoreFile(chunkDownloader *ChunkDownloader, chun
 		hasher := manager.config.NewFileHasher()
 
 		var localChunk *Chunk
-		defer chunkDownloader.operator.config.PutChunk(localChunk)
+		// localChunk is only allocated later, so it must be read when the function returns
+		defer func() {
+			chunkDownloader.operator.config.PutChunk(localChunk)
+		}()
 
 		var offset int64
 		for i := entry.StartChunk; i <= entry.EndChunk; i++ {
@@ -1535,10 +1786,14 @@ func (manager *BackupManager) RestoreFile(chunkDownloader *ChunkDownloader, chun
 		newFile.Close()
 		newFile = nil
 
-		err = os.Remove(fullPath)
-		if err != nil && !os.IsNotExist(err) {
-			LOG_ERROR("DOWNLOAD_REMOVE", "Failed to remove the old file: %v", err)
-			return false, nil
+		// On POSIX systems rename replaces the old file atomically; removing it first would lose it if the restore
+		// were interrupted in between.  Windows can't rename over an existing file.
+		if runtime.GOOS == "windows" {
+			err = os.Remove(fullPath)
+			if err != nil && !os.IsNotExist(err) {
+				LOG_ERROR("DOWNLOAD_REMOVE", "Failed to remove the old file: %v", err)
+				return false, nil
+			}
 		}
 
 		err = os.Rename(temporaryPath, fullPath)
@@ -1565,7 +1820,7 @@ func (manager *BackupManager) CopySnapshots(otherManager *BackupManager, snapsho
 
 	if otherManager.config.DataShards != 0 && otherManager.config.ParityShards != 0 {
 		LOG_INFO("BACKUP_ERASURECODING", "Erasure coding is enabled for the destination storage with %d data shards and %d parity shards",
-		         otherManager.config.DataShards, otherManager.config.ParityShards)
+			otherManager.config.DataShards, otherManager.config.ParityShards)
 	}
 
 	if otherManager.config.rsaPublicKey != nil && len(otherManager.config.FileKey) > 0 {
@@ -1666,15 +1921,15 @@ func (manager *BackupManager) CopySnapshots(otherManager *BackupManager, snapsho
 		LOG_TRACE("SNAPSHOT_COPY", "Copying snapshot %s at revision %d", snapshot.ID, snapshot.Revision)
 
 		for _, chunkHash := range snapshot.FileSequence {
-			chunks[chunkHash] = true  // The chunk is a snapshot chunk
+			chunks[chunkHash] = true // The chunk is a snapshot chunk
 		}
 
 		for _, chunkHash := range snapshot.ChunkSequence {
-			chunks[chunkHash] = true  // The chunk is a snapshot chunk
+			chunks[chunkHash] = true // The chunk is a snapshot chunk
 		}
 
 		for _, chunkHash := range snapshot.LengthSequence {
-			chunks[chunkHash] = true  // The chunk is a snapshot chunk
+			chunks[chunkHash] = true // The chunk is a snapshot chunk
 		}
 
 		description := manager.SnapshotManager.DownloadSequence(snapshot.ChunkSequence)
@@ -1687,7 +1942,7 @@ func (manager *BackupManager) CopySnapshots(otherManager *BackupManager, snapsho
 
 		for _, chunkHash := range snapshot.ChunkHashes {
 			if _, found := chunks[chunkHash]; !found {
-				chunks[chunkHash] = false  // The chunk is a file chunk
+				chunks[chunkHash] = false // The chunk is a file chunk
 			}
 		}
 
@@ -1723,19 +1978,21 @@ func (manager *BackupManager) CopySnapshots(otherManager *BackupManager, snapsho
 		}
 	}
 
-	LOG_INFO("SNAPSHOT_COPY", "Chunks to copy: %d, to skip: %d, total: %d", len(chunksToCopy), len(chunks) - len(chunksToCopy), len(chunks))
+	LOG_INFO("SNAPSHOT_COPY", "Chunks to copy: %d, to skip: %d, total: %d", len(chunksToCopy), len(chunks)-len(chunksToCopy), len(chunks))
 
 	chunkDownloader := CreateChunkOperator(manager.config, manager.storage, nil, false, false, downloadingThreads, false)
 
 	var uploadedBytes int64
 	startTime := time.Now()
 
-	copiedChunks := 0
+	// Updated by the upload goroutines
+	var copiedChunks int64
 	chunkUploader := CreateChunkOperator(otherManager.config, otherManager.storage, nil, false, false, uploadingThreads, false)
-	chunkUploader.UploadCompletionFunc =  func(chunk *Chunk, chunkIndex int, skipped bool, chunkSize int, uploadSize int) {
+	chunkUploader.UploadCompletionFunc = func(chunk *Chunk, chunkIndex int, skipped bool, chunkSize int, uploadSize int) {
+		// A chunk that already exists at the destination is completed without being uploaded (uploadSize is 0)
 		action := "Skipped"
-		if !skipped {
-			copiedChunks++
+		if !skipped && uploadSize > 0 {
+			atomic.AddInt64(&copiedChunks, 1)
 			action = "Copied"
 		}
 
@@ -1743,11 +2000,11 @@ func (manager *BackupManager) CopySnapshots(otherManager *BackupManager, snapsho
 
 		elapsedTime := time.Now().Sub(startTime).Seconds()
 		speed := int64(float64(atomic.LoadInt64(&uploadedBytes)) / elapsedTime)
-		remainingTime := int64(float64(len(chunksToCopy) - chunkIndex - 1) / float64(chunkIndex + 1) * elapsedTime)
-		percentage := float64(chunkIndex + 1) / float64(len(chunksToCopy)) * 100.0
+		remainingTime := int64(float64(len(chunksToCopy)-chunkIndex-1) / float64(chunkIndex+1) * elapsedTime)
+		percentage := float64(chunkIndex+1) / float64(len(chunksToCopy)) * 100.0
 		LOG_INFO("COPY_PROGRESS", "%s chunk %s (%d/%d) %sB/s %s %.1f%%",
-				action, chunk.GetID(), chunkIndex + 1, len(chunksToCopy),
-				PrettySize(speed), PrettyTime(remainingTime), percentage)
+			action, chunk.GetID(), chunkIndex+1, len(chunksToCopy),
+			PrettySize(speed), PrettyTime(remainingTime), percentage)
 		otherManager.config.PutChunk(chunk)
 	}
 
@@ -1770,7 +2027,7 @@ func (manager *BackupManager) CopySnapshots(otherManager *BackupManager, snapsho
 	chunkDownloader.Stop()
 	chunkUploader.Stop()
 
-	LOG_INFO("SNAPSHOT_COPY", "Copied %d new chunks and skipped %d existing chunks", copiedChunks, len(chunks) - copiedChunks)
+	LOG_INFO("SNAPSHOT_COPY", "Copied %d new chunks and skipped %d existing chunks", copiedChunks, int64(len(chunks))-copiedChunks)
 
 	for _, snapshot := range snapshots {
 		if revisionMap[snapshot.ID][snapshot.Revision] == false {

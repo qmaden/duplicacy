@@ -19,6 +19,9 @@ type S3CStorage struct {
 	storageDir string
 }
 
+// NumberOfThreads returns the number of threads the storage keeps per-thread state for.
+func (storage *S3CStorage) NumberOfThreads() int { return len(storage.buckets) }
+
 // CreateS3CStorage creates a amazon s3 storage object.
 func CreateS3CStorage(regionName string, endpoint string, bucketName string, storageDir string,
 	accessKey string, secretKey string, threads int) (storage *S3CStorage, err error) {

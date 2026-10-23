@@ -89,7 +89,6 @@ func TestChunkMaker(t *testing.T) {
 
 		chunkArray1, totalSize1 := splitIntoChunks(content, 10, 32, 64, 16)
 
-
 		for _, n := range [...]int{6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16} {
 			chunkArray2, totalSize2 := splitIntoChunks(content, n, 32, 64, 16)
 

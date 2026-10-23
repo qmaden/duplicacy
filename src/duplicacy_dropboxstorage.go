@@ -6,7 +6,7 @@ package duplicacy
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"strings"
 
 	"github.com/gilbertchen/go-dropbox"
@@ -19,6 +19,9 @@ type DropboxStorage struct {
 	minimumNesting int // The minimum level of directories to dive into before searching for the chunk file.
 	storageDir     string
 }
+
+// NumberOfThreads returns the number of threads the storage keeps per-thread state for.
+func (storage *DropboxStorage) NumberOfThreads() int { return len(storage.clients) }
 
 // CreateDropboxStorage creates a dropbox storage object.
 func CreateDropboxStorage(refreshToken string, storageDir string, minimumNesting int, threads int) (storage *DropboxStorage, err error) {
@@ -200,7 +203,7 @@ func (storage *DropboxStorage) DownloadFile(threadIndex int, filePath string, ch
 	}
 
 	defer output.Body.Close()
-	defer ioutil.ReadAll(output.Body)
+	defer io.ReadAll(output.Body)
 
 	_, err = RateLimitedCopy(chunk, output.Body, storage.DownloadRateLimit/len(storage.clients))
 	return err

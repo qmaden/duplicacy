@@ -9,15 +9,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
-	"sort"
 
-    "github.com/vmihailenco/msgpack"
-
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Snapshot represents a backup of the repository.
@@ -58,14 +56,9 @@ func CreateEmptySnapshot(id string) (snapshto *Snapshot) {
 	}
 }
 
-type DirectoryListing struct {
-	directory string
-	files *[]Entry
-}
-
 func (snapshot *Snapshot) ListLocalFiles(top string, nobackupFile string,
-								         filtersFile string, excludeByAttribute bool, listingChannel chan *Entry,
-								         skippedDirectories *[]string, skippedFiles *[]string) {
+	filtersFile string, excludeByAttribute bool, listingChannel chan *Entry,
+	skippedDirectories *[]string, skippedFiles *[]string) {
 
 	var patterns []string
 
@@ -104,19 +97,18 @@ func (snapshot *Snapshot) ListLocalFiles(top string, nobackupFile string,
 	close(listingChannel)
 }
 
-func (snapshot *Snapshot)ListRemoteFiles(config *Config, chunkOperator *ChunkOperator, entryOut func(*Entry) bool) {
+func (snapshot *Snapshot) ListRemoteFiles(config *Config, chunkOperator *ChunkOperator, entryOut func(*Entry) bool) {
 
-	var chunks []string
-	for _, chunkHash := range snapshot.FileSequence {
-		chunks = append(chunks, chunkOperator.config.GetChunkIDFromHash(chunkHash))
-	}
+	// The file list chunks are downloaded ahead in parallel and consumed in order
+	sequence := chunkOperator.NewSequenceDownloader(snapshot.FileSequence, true)
+	defer sequence.Close()
 
 	var chunk *Chunk
 	reader := NewSequenceReader(snapshot.FileSequence, func(chunkHash string) []byte {
 		if chunk != nil {
 			config.PutChunk(chunk)
 		}
-		chunk = chunkOperator.Download(chunkHash, 0, true)
+		chunk = sequence.Next()
 		return chunk.GetBytes()
 	})
 
@@ -124,12 +116,12 @@ func (snapshot *Snapshot)ListRemoteFiles(config *Config, chunkOperator *ChunkOpe
 		if chunk != nil {
 			config.PutChunk(chunk)
 		}
-	} ()
+	}()
 
 	// Normally if Version is 0 then the snapshot is created by CLI v2 but unfortunately CLI 3.0.1 does not set the
 	// version bit correctly when copying old backups.  So we need to check the first byte -- if it is '[' then it is
 	// the old format.  The new format starts with a string encoded in msgpack and the first byte can't be '['.
-	if snapshot.Version == 0 || reader.GetFirstByte() == '['{
+	if snapshot.Version == 0 || reader.GetFirstByte() == '[' {
 		LOG_INFO("SNAPSHOT_VERSION", "snapshot %s at revision %d is encoded in an old version format", snapshot.ID, snapshot.Revision)
 		files := make([]*Entry, 0)
 		decoder := json.NewDecoder(reader)
@@ -147,6 +139,13 @@ func (snapshot *Snapshot)ListRemoteFiles(config *Config, chunkOperator *ChunkOpe
 			err = decoder.Decode(&entry)
 			if err != nil {
 				LOG_ERROR("SNAPSHOT_PARSE", "Failed to load files specified in the snapshot %s at revision %d: %v",
+					snapshot.ID, snapshot.Revision, err)
+				return
+			}
+			// Version 1 entries are checked while decoding below; version 0 entries need the same check, or a
+			// corrupted file list would make restore, backup and check index past the chunk list
+			if err = entry.check(snapshot.ChunkLengths); err != nil {
+				LOG_ERROR("SNAPSHOT_ENTRY", "Failed to load the snapshot %s at revision %d: %v",
 					snapshot.ID, snapshot.Revision, err)
 				return
 			}
@@ -200,7 +199,7 @@ func (snapshot *Snapshot)ListRemoteFiles(config *Config, chunkOperator *ChunkOpe
 
 	} else {
 		LOG_ERROR("SNAPSHOT_VERSION", "snapshot %s at revision %d is encoded in unsupported version %d format",
-				  snapshot.ID, snapshot.Revision, snapshot.Version)
+			snapshot.ID, snapshot.Revision, snapshot.Version)
 		return
 	}
 
@@ -243,7 +242,7 @@ func ProcessFilterFile(patternFile string, includedFiles []string) (patterns []s
 	}
 	includedFiles = append(includedFiles, patternFile)
 	LOG_INFO("SNAPSHOT_FILTER", "Parsing filter file %s", patternFile)
-	patternFileContent, err := ioutil.ReadFile(patternFile)
+	patternFileContent, err := os.ReadFile(patternFile)
 	if err == nil {
 		patternFileLines := strings.Split(string(patternFileContent), "\n")
 		patterns = ProcessFilterLines(patternFileLines, includedFiles)
@@ -263,7 +262,7 @@ func ProcessFilterLines(patternFileLines []string, includedFiles []string) (patt
 			if patternIncludeFile == "" {
 				continue
 			}
-			if ! filepath.IsAbs(patternIncludeFile) {
+			if !filepath.IsAbs(patternIncludeFile) {
 				basePath := ""
 				if len(includedFiles) == 0 {
 					basePath, _ = os.Getwd()
@@ -490,4 +489,3 @@ func encodeSequence(sequence []string) []string {
 
 	return sequenceInHex
 }
-

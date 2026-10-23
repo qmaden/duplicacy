@@ -11,10 +11,11 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
-	"runtime"
 
 	"github.com/gilbertchen/gopass"
 	"golang.org/x/crypto/pbkdf2"
@@ -56,7 +57,7 @@ func IsEmptyFilter(pattern string) bool {
 }
 
 func IsUnspecifiedFilter(pattern string) bool {
-	if pattern[0] != '+' && pattern[0] != '-' && !strings.HasPrefix(pattern, "i:") && !strings.HasPrefix(pattern, "e:")  {
+	if pattern[0] != '+' && pattern[0] != '-' && !strings.HasPrefix(pattern, "i:") && !strings.HasPrefix(pattern, "e:") {
 		return true
 	} else {
 		return false
@@ -239,7 +240,8 @@ func GetPassword(preference Preference, passwordType string, prompt string,
 		password = scanner.Text()
 	} else {
 		passwordInBytes, err := gopass.GetPasswdMasked()
-		if err != nil {
+		// Piped input may end without a newline
+		if err != nil && !(err == io.EOF && len(passwordInBytes) > 0) {
 			LOG_ERROR("PASSWORD_READ", "Failed to read the password: %v", err)
 			return ""
 		}
@@ -275,7 +277,6 @@ func SavePassword(preference Preference, passwordType string, password string) {
 // The following code was modified from the online article  'Matching Wildcards: An Algorithm', by Kirk J. Krauss,
 // Dr. Dobb's, August 26, 2008. However, the version in the article doesn't handle cases like matching 'abcccd'
 // against '*ccd', and the version here fixed that issue.
-//
 func matchPattern(text string, pattern string) bool {
 
 	textLength := len(text)
@@ -469,8 +470,24 @@ func PrintMemoryUsage() {
 		runtime.ReadMemStats(&m)
 
 		LOG_INFO("MEMORY_STATS", "Currently allocated: %s, total allocated: %s, system memory: %s, number of GCs: %d",
-		         PrettySize(int64(m.Alloc)), PrettySize(int64(m.TotalAlloc)), PrettySize(int64(m.Sys)), m.NumGC)
+			PrettySize(int64(m.Alloc)), PrettySize(int64(m.TotalAlloc)), PrettySize(int64(m.Sys)), m.NumGC)
 
 		time.Sleep(time.Second)
 	}
+}
+
+// readDirectory returns the entries of a directory sorted by name, without following symbolic links, as the
+// deprecated ioutil.ReadDir did (os.ReadDir returns DirEntry values instead of FileInfo).
+func readDirectory(path string) ([]os.FileInfo, error) {
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	list, err := directory.Readdir(-1)
+	directory.Close()
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Name() < list[j].Name() })
+	return list, nil
 }

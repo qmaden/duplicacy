@@ -5,17 +5,17 @@
 package duplicacy
 
 import (
-	"encoding/hex"
-	"encoding/binary"
-	"fmt"
-	"os"
-	"io"
-	"path"
+	"crypto/rand"
 	"crypto/sha256"
-	"crypto/rand"	
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"path"
 	"sync"
 
-    "github.com/vmihailenco/msgpack"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // This struct stores information about a file entry that has been modified
@@ -29,38 +29,39 @@ type ModifiedEntry struct {
 // depending on if maximumInMemoryEntries is reached.
 //
 // The idea behind the on-disk entry list is that entries are written to a disk file as they are coming in.
-// Entries that have been modified and thus need to be uploaded will have their Incomplete bit set (i.e., 
+// Entries that have been modified and thus need to be uploaded will have their Incomplete bit set (i.e.,
 // with a size of -1).  When the limit is reached, entries are moved to a disk file but ModifiedEntries and
-// UploadedChunks are still kept in memory.  When later entries are read from the entry list, incomplete 
+// UploadedChunks are still kept in memory.  When later entries are read from the entry list, incomplete
 // entries are back-annotated with info from ModifiedEntries and UploadedChunk* before sending them out.
 
 type EntryList struct {
-	onDiskFile *os.File                     // the file to store entries
-	encoder *msgpack.Encoder                // msgpack encoder for entry serialization
-	entries []*Entry                        // in-memory entry list
-	
-	SnapshotID string                       // the snapshot id
-	Token string                            // this unique random token makes sure we read/write 
-	                                        // the same entry list
-	ModifiedEntries []ModifiedEntry         // entries that will be uploaded
+	onDiskFile *os.File         // the file to store entries
+	encoder    *msgpack.Encoder // msgpack encoder for entry serialization
+	entries    []*Entry         // in-memory entry list
 
-	UploadedChunkHashes []string            // chunks from entries that have been uploaded
-	UploadedChunkLengths []int              // chunk lengths from entries that have been uploaded
-	uploadedChunkLock sync.Mutex            // lock for UploadedChunkHashes and UploadedChunkLengths
+	SnapshotID string // the snapshot id
+	Token      string // this unique random token makes sure we read/write
+	// the same entry list
+	ModifiedEntries []ModifiedEntry // entries that will be uploaded
 
-	PreservedChunkHashes []string           // chunks from entries not changed
-	PreservedChunkLengths []int             // chunk lengths from entries not changed
+	UploadedChunkHashes  []string   // chunks from entries that have been uploaded
+	UploadedChunkLengths []int      // chunk lengths from entries that have been uploaded
+	uploadedChunkLock    sync.Mutex // lock for UploadedChunkHashes and UploadedChunkLengths
 
-	Checksum string                         // checksum of all entries to detect disk corruption
+	PreservedChunkHashes  []string // chunks from entries not changed
+	PreservedChunkLengths []int    // chunk lengths from entries not changed
 
-	maximumInMemoryEntries int              // max in-memory entries
-	NumberOfEntries int64                   // number of entries (not including directories and links)
-	cachePath string                        // the directory for the on-disk file
+	Checksum string // checksum of all entries to detect disk corruption
+
+	maximumInMemoryEntries int    // max in-memory entries
+	inMemoryBytes          int64  // estimated memory used by the in-memory entries
+	NumberOfEntries        int64  // number of entries (not including directories and links)
+	cachePath              string // the directory for the on-disk file
 
 	// These 3 variables are used in entry infomation back-annotation
-	modifiedEntryIndex int                  // points to the current modified entry
-	uploadedChunkIndex int                  // counter for upload chunks
-	uploadedChunkOffset int                 // the start offset for the current modified entry
+	modifiedEntryIndex  int // points to the current modified entry
+	uploadedChunkIndex  int // counter for upload chunks
+	uploadedChunkOffset int // the start offset for the current modified entry
 
 }
 
@@ -73,11 +74,11 @@ func CreateEntryList(snapshotID string, cachePath string, maximumInMemoryEntries
 		return nil, fmt.Errorf("Failed to create a random token: %v", err)
 	}
 
-	entryList := &EntryList {
-		SnapshotID: snapshotID,
+	entryList := &EntryList{
+		SnapshotID:             snapshotID,
 		maximumInMemoryEntries: maximumInMemoryEntries,
-		cachePath: cachePath,
-		Token: string(token),
+		cachePath:              cachePath,
+		Token:                  string(token),
 	}
 
 	return entryList, nil
@@ -85,7 +86,7 @@ func CreateEntryList(snapshotID string, cachePath string, maximumInMemoryEntries
 }
 
 // Create the on-disk entry list file
-func (entryList *EntryList)createOnDiskFile() error {
+func (entryList *EntryList) createOnDiskFile() error {
 	file, err := os.OpenFile(path.Join(entryList.cachePath, "incomplete_files"), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("Failed to create on disk entry list: %v", err)
@@ -105,11 +106,23 @@ func (entryList *EntryList)createOnDiskFile() error {
 			return err
 		}
 	}
+
+	// The entries are read back from the file from now on
+	entryList.entries = nil
+	entryList.inMemoryBytes = 0
 	return nil
 }
 
+// Entries are moved to disk once they use this much memory (estimated), whatever -max-in-memory-entries says
+var maximumInMemoryEntryBytes = int64(128 << 20)
+
+// entryMemorySize estimates the memory an in-memory entry uses: its strings plus the struct and the slice pointer.
+func entryMemorySize(entry *Entry) int64 {
+	return int64(len(entry.Path)+len(entry.Link)+len(entry.Hash)) + 160
+}
+
 // Add an entry to the entry list
-func (entryList *EntryList)AddEntry(entry *Entry) error {
+func (entryList *EntryList) AddEntry(entry *Entry) error {
 
 	if !entry.IsDir() && !entry.IsLink() {
 		entryList.NumberOfEntries++
@@ -119,11 +132,11 @@ func (entryList *EntryList)AddEntry(entry *Entry) error {
 		if entry.IsDir() || entry.IsLink() {
 			entry.Size = 0
 		} else {
-			modifiedEntry := ModifiedEntry {
+			modifiedEntry := ModifiedEntry{
 				Path: entry.Path,
 				Size: -1,
 			}
-		
+
 			entryList.ModifiedEntries = append(entryList.ModifiedEntries, modifiedEntry)
 		}
 	}
@@ -132,7 +145,9 @@ func (entryList *EntryList)AddEntry(entry *Entry) error {
 		return entry.EncodeWithHash(entryList.encoder)
 	} else {
 		entryList.entries = append(entryList.entries, entry)
-		if entryList.maximumInMemoryEntries >= 0 && len(entryList.entries) > entryList.maximumInMemoryEntries {
+		entryList.inMemoryBytes += entryMemorySize(entry)
+		if (entryList.maximumInMemoryEntries >= 0 && len(entryList.entries) > entryList.maximumInMemoryEntries) ||
+			entryList.inMemoryBytes > maximumInMemoryEntryBytes {
 			err := entryList.createOnDiskFile()
 			if err != nil {
 				return err
@@ -144,13 +159,13 @@ func (entryList *EntryList)AddEntry(entry *Entry) error {
 }
 
 // Add a preserved chunk that belongs to files that have not been modified
-func (entryList *EntryList)AddPreservedChunk(chunkHash string, chunkSize int) {
+func (entryList *EntryList) AddPreservedChunk(chunkHash string, chunkSize int) {
 	entryList.PreservedChunkHashes = append(entryList.PreservedChunkHashes, chunkHash)
 	entryList.PreservedChunkLengths = append(entryList.PreservedChunkLengths, chunkSize)
 }
 
 // Add a chunk just uploaded (that belongs to files that have been modified)
-func (entryList *EntryList)AddUploadedChunk(chunkIndex int, chunkHash string, chunkSize int) {
+func (entryList *EntryList) AddUploadedChunk(chunkIndex int, chunkHash string, chunkSize int) {
 	entryList.uploadedChunkLock.Lock()
 
 	for len(entryList.UploadedChunkHashes) <= chunkIndex {
@@ -192,7 +207,7 @@ func (entryList *EntryList) getChunkLength(index int) int {
 	if index < len(entryList.PreservedChunkLengths) {
 		return entryList.PreservedChunkLengths[index]
 	} else {
-		return entryList.UploadedChunkLengths[index - len(entryList.PreservedChunkLengths)]
+		return entryList.UploadedChunkLengths[index-len(entryList.PreservedChunkLengths)]
 	}
 }
 
@@ -207,7 +222,7 @@ func (entryList *EntryList) checkEntry(entry *Entry) error {
 		return nil
 	}
 
-	numberOfChunks := len(entryList.PreservedChunkLengths) + len(entryList.UploadedChunkLengths) 
+	numberOfChunks := len(entryList.PreservedChunkLengths) + len(entryList.UploadedChunkLengths)
 
 	if entry.StartChunk < 0 {
 		return fmt.Errorf("the file %s starts at chunk %d", entry.Path, entry.StartChunk)
@@ -259,7 +274,7 @@ func (entryList *EntryList) checkEntry(entry *Entry) error {
 
 // An incomplete entry (with a size of -1) does not have 'startChunk', 'startOffset', 'endChunk', and 'endOffset'.  This function
 // is to fill in these information before sending the entry out.
-func (entryList *EntryList) fillAndSendEntry(entry *Entry, entryOut func(*Entry)error) (skipped bool, err error) {
+func (entryList *EntryList) fillAndSendEntry(entry *Entry, entryOut func(*Entry) error) (skipped bool, err error) {
 
 	if entry.IsComplete() {
 		err := entryList.checkEntry(entry)
@@ -303,7 +318,7 @@ func (entryList *EntryList) fillAndSendEntry(entry *Entry, entryOut func(*Entry)
 	}
 
 	entry.EndOffset = int(endOffset)
-	entryList.uploadedChunkOffset = entry.EndOffset 
+	entryList.uploadedChunkOffset = entry.EndOffset
 	if entry.EndOffset == entryList.UploadedChunkLengths[entryList.uploadedChunkIndex] {
 		entryList.uploadedChunkIndex++
 		entryList.uploadedChunkOffset = 0
@@ -318,7 +333,7 @@ func (entryList *EntryList) fillAndSendEntry(entry *Entry, entryOut func(*Entry)
 }
 
 // Iterate through the entries in this entry list
-func (entryList *EntryList) ReadEntries(entryOut func(*Entry)error) (error) {
+func (entryList *EntryList) ReadEntries(entryOut func(*Entry) error) error {
 
 	entryList.modifiedEntryIndex = 0
 	entryList.uploadedChunkIndex = 0
@@ -345,8 +360,8 @@ func (entryList *EntryList) ReadEntries(entryOut func(*Entry)error) (error) {
 		if err != nil {
 			return err
 		}
-	
-    	for _, err = decoder.PeekCode(); err == nil; _, err = decoder.PeekCode() {	
+
+		for _, err = decoder.PeekCode(); err == nil; _, err = decoder.PeekCode() {
 			entry, err := DecodeEntryWithHash(decoder)
 			if err != nil {
 				return err
@@ -375,19 +390,11 @@ func (entryList *EntryList) SaveIncompleteSnapshot() {
 	defer entryList.uploadedChunkLock.Unlock()
 
 	if entryList.onDiskFile == nil {
+		// This writes the in-memory entries to the file (they used to be written a second time here)
 		err := entryList.createOnDiskFile()
 		if err != nil {
 			LOG_WARN("INCOMPLETE_SAVE", "Failed to create the incomplete snapshot file: %v", err)
 			return
-		}
-
-		for _, entry := range entryList.entries {
-
-			err = entry.EncodeWithHash(entryList.encoder)
-			if err != nil {
-				LOG_WARN("INCOMPLETE_SAVE", "Failed to save the entry %s: %v", entry.Path, err)
-				return
-			}
 		}
 	}
 
@@ -429,11 +436,11 @@ func (entryList *EntryList) SaveIncompleteSnapshot() {
 		return
 	}
 
-	LOG_INFO("INCOMPLETE_SAVE", "Incomplete snapshot saved to %s", filePath)	
+	LOG_INFO("INCOMPLETE_SAVE", "Incomplete snapshot saved to %s", filePath)
 }
 
 // Calculate a checksum for this entry list
-func (entryList *EntryList) CalculateChecksum() string{
+func (entryList *EntryList) CalculateChecksum() string {
 
 	hasher := sha256.New()
 	for _, s := range entryList.UploadedChunkHashes {
@@ -464,17 +471,15 @@ func (entryList *EntryList) CalculateChecksum() string{
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-// Check if all chunks exist in 'chunkCache'
-func (entryList *EntryList) CheckChunks(config *Config, chunkCache map[string]bool) bool {
+// Check if all chunks exist, according to 'exists' which takes a chunk id
+func (entryList *EntryList) CheckChunks(config *Config, exists func(chunkID string) bool) bool {
 	for _, chunkHash := range entryList.UploadedChunkHashes {
-		chunkID := config.GetChunkIDFromHash(chunkHash)
-		if _, ok := chunkCache[chunkID]; !ok {
+		if !exists(config.GetChunkIDFromHash(chunkHash)) {
 			return false
 		}
 	}
 	for _, chunkHash := range entryList.PreservedChunkHashes {
-		chunkID := config.GetChunkIDFromHash(chunkHash)
-		if _, ok := chunkCache[chunkID]; !ok {
+		if !exists(config.GetChunkIDFromHash(chunkHash)) {
 			return false
 		}
 	}
@@ -498,7 +503,7 @@ func loadIncompleteSnapshot(snapshotID string, cachePath string) *EntryList {
 		return nil
 	}
 
-	entryList := &EntryList {}
+	entryList := &EntryList{}
 	entryListFile, err := os.OpenFile(entryListFilePath, os.O_RDONLY, 0600)
 	if err != nil {
 		LOG_WARN("INCOMPLETE_LOAD", "Failed to open the incomplete snapshot: %v", err)
@@ -551,7 +556,7 @@ func loadIncompleteSnapshot(snapshotID string, cachePath string) *EntryList {
 	}
 
 	LOG_INFO("INCOMPLETE_LOAD", "Previous incomplete backup contains %d files and %d chunks",
-	         entryList.NumberOfEntries, len(entryList.PreservedChunkLengths) + len(entryList.UploadedChunkHashes))
+		entryList.NumberOfEntries, len(entryList.PreservedChunkLengths)+len(entryList.UploadedChunkHashes))
 
 	return entryList
 }
@@ -569,6 +574,5 @@ func deleteIncompleteSnapshot(cachePath string) {
 			}
 		}
 	}
-
 
 }

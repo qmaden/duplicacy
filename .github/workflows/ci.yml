@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.10"
+  GOTOOLCHAIN: local
+
+jobs:
+  # Supported platforms are Linux x86-64 and macOS; Windows code is kept but not built or tested.
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build
+        run: go build ./...
+      - name: Unit, golden-fixture and backup/prune tests (race detector)
+        run: go test -race -count=1 -timeout 30m ./...
+
+  storage-options:
+    name: Storage options (${{ matrix.flag }})
+    strategy:
+      fail-fast: false
+      matrix:
+        flag: [-erasure-coding, -separate-metadata, -rsa, -fixed-chunk-size]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Backup, restore and prune with ${{ matrix.flag }}
+        working-directory: src
+        run: go test -count=1 -timeout 20m -run 'TestBackupManager|TestPersistRestore|TestStorage|TestPrune' . -args ${{ matrix.flag }}
+
+  cloud-backends:
+    name: Cloud backends against fakes (${{ matrix.storage }})
+    strategy:
+      fail-fast: false
+      matrix:
+        storage: [fake-s3, fake-gcs, fake-gcd, azurite]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Start Azurite with a random account key
+        if: matrix.storage == 'azurite'
+        run: |
+          key=$(openssl rand -base64 64 | tr -d '\n')
+          echo "::add-mask::$key"
+          docker run -d -p 127.0.0.1:10000:10000 -e AZURITE_ACCOUNTS="ci:$key" \
+            mcr.microsoft.com/azure-storage/azurite azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+          echo "DUPLICACY_TEST_AZURITE_URL=http://127.0.0.1:10000/ci" >> "$GITHUB_ENV"
+          echo "DUPLICACY_TEST_AZURITE_ACCOUNT=ci" >> "$GITHUB_ENV"
+          echo "DUPLICACY_TEST_AZURITE_KEY=$key" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do nc -z 127.0.0.1 10000 && break; sleep 1; done
+      - name: Storage, backup, prune and copy tests on ${{ matrix.storage }}
+        working-directory: src
+        run: |
+          for flag in "" -erasure-coding -separate-metadata; do
+            echo "== $flag"
+            go test -race -count=1 -timeout 20m \
+              -run 'TestStorage$|TestBackupManager|TestPrune|TestCopySnapshots|TestCleanStorage|TestAzureStorage' \
+              . -args -storage ${{ matrix.storage }} $flag
+          done
+
+  go-next:
+    name: Next Go release (1.27)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+      - run: go build ./...
+      - run: go test -count=1 -timeout 30m ./...
+
+  cross-build:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build release targets
+        run: |
+          # Supported platforms: Linux x86-64 and macOS
+          for target in linux/amd64 darwin/arm64 darwin/amd64; do
+            echo "== $target"
+            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./duplicacy
+          done
+
+  lint:
+    name: Lint and vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l src duplicacy internal)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck (correctness checks)
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 -checks 'U1000,SA1*,SA2*,SA3*,SA4017,SA5*,SA6*,SA9*,-SA1019' ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...

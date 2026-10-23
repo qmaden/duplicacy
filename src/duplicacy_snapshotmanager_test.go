@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"strings"
@@ -650,7 +649,7 @@ func TestPruneGhostSnapshots(t *testing.T) {
 	createTestSnapshot(snapshotManager, "vm1@host1", 2, now-2*day-3600, now-2*day-60, []string{chunkHash2, chunkHash3}, "tag")
 	checkTestSnapshots(snapshotManager, 2, 0)
 
-	snapshot1, err := ioutil.ReadFile(path.Join(testDir, "snapshots", "vm1@host1", "1"))
+	snapshot1, err := os.ReadFile(path.Join(testDir, "snapshots", "vm1@host1", "1"))
 	if err != nil {
 		t.Errorf("Failed to read snapshot file: %v", err)
 	}
@@ -662,7 +661,7 @@ func TestPruneGhostSnapshots(t *testing.T) {
 
 	// Recover the snapshot file for revision 1; this is to simulate a scenario where prune may encounter a network error after
 	// leaving the fossil collection but before deleting any snapshots.
-	err = ioutil.WriteFile(path.Join(testDir, "snapshots", "vm1@host1", "1"), snapshot1, 0644)
+	err = os.WriteFile(path.Join(testDir, "snapshots", "vm1@host1", "1"), snapshot1, 0644)
 	if err != nil {
 		t.Errorf("Failed to write snapshot file: %v", err)
 	}
@@ -689,4 +688,109 @@ func TestPruneGhostSnapshots(t *testing.T) {
 	snapshotManager.PruneSnapshots("vm1@host1", "vm1@host1", []int{}, []string{}, []string{}, false, false, []string{}, false, false, false, 1)
 	checkTestSnapshots(snapshotManager, 3, 0)
 	snapshotManager.CheckSnapshots("vm1@host1", []int{2, 3, 4}, "", false, false, false, false, false, false, false, 1, false)
+}
+
+// B7: retention policies used to be applied only when given in decreasing order of age; others were skipped.
+func TestPruneRetentionPolicyOrder(t *testing.T) {
+	setTestingT(t)
+
+	run := func(name string, retentions []string) int {
+		testDir := path.Join(os.TempDir(), "duplicacy_test", "retention_order_"+name)
+		snapshotManager := createTestSnapshotManager(testDir)
+		var chunkHashes []string
+		for i := 0; i < 30; i++ {
+			chunkHashes = append(chunkHashes, uploadRandomChunk(snapshotManager, 1024))
+		}
+		now := time.Now().Unix()
+		day := int64(24 * 3600)
+		for i := 0; i < 30; i++ {
+			createTestSnapshot(snapshotManager, "vm1@host1", i+1, now-int64(30-i)*day-3600, now-int64(30-i)*day-60,
+				[]string{chunkHashes[i]}, "tag")
+		}
+		snapshotManager.PruneSnapshots("vm1@host1", "vm1@host1", []int{}, []string{}, retentions, false, true,
+			[]string{}, false, false, false, 1)
+		revisions, err := snapshotManager.ListSnapshotRevisions("vm1@host1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(revisions)
+	}
+
+	ordered := run("ordered", []string{"0:20", "3:14", "2:7"})
+	misordered := run("misordered", []string{"2:7", "0:20", "3:14"})
+	if ordered != 12 {
+		t.Errorf("%d snapshots kept with ordered policies instead of 12", ordered)
+	}
+	if misordered != ordered {
+		t.Errorf("%d snapshots kept with policies out of order instead of %d", misordered, ordered)
+	}
+}
+
+// B6: on strongly consistent storages a snapshot ending just after a fossil collection, by the clocks involved,
+// used to count as proof that no backup was still in progress; a small clock skew could then delete fossils that
+// a running backup needs.
+func TestIsDeletableClockMargin(t *testing.T) {
+	now := time.Now().Unix()
+	allSnapshots := map[string][]*Snapshot{
+		"host1": {createDummySnapshot("host1", 1, now-2*24*3600), createDummySnapshot("host1", 2, now+60)},
+	}
+	collection := &FossilCollection{EndTime: now, LastRevisions: map[string]int{"host1": 1}}
+	if isDeletable, _ := collection.IsDeletable(true, nil, allSnapshots); isDeletable {
+		t.Error("A snapshot ending one minute after the collection made the fossils deletable")
+	}
+	allSnapshots["host1"][1] = createDummySnapshot("host1", 2, now+3600)
+	if isDeletable, _ := collection.IsDeletable(true, nil, allSnapshots); !isDeletable {
+		t.Error("A snapshot ending one hour after the collection didn't make the fossils deletable")
+	}
+}
+
+// B6: a second prune must not run while another one is in progress.
+func TestPruneLock(t *testing.T) {
+	setTestingT(t)
+	testDir := path.Join(os.TempDir(), "duplicacy_test", "prune_lock")
+	snapshotManager := createTestSnapshotManager(testDir)
+	now := time.Now().Unix()
+	day := int64(24 * 3600)
+	chunkHash1 := uploadRandomChunk(snapshotManager, 1024)
+	chunkHash2 := uploadRandomChunk(snapshotManager, 1024)
+	createTestSnapshot(snapshotManager, "repository1", 1, now-3*day-3600, now-3*day-60, []string{chunkHash1}, "tag")
+	createTestSnapshot(snapshotManager, "repository1", 2, now-2*day-3600, now-2*day-60, []string{chunkHash2}, "tag")
+	createTestSnapshot(snapshotManager, "repository1", 3, now-1*day-3600, now-1*day-60, []string{chunkHash2}, "tag")
+
+	writeLock := func(age int64) {
+		description, _ := json.Marshal(pruneLock{Host: "other-host", PID: 1234, SnapshotID: "other", Time: now - age, Token: "other"})
+		if err := snapshotManager.storage.UploadFile(0, pruneLockFile, description); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prune := func(revision int, dryRun bool) string {
+		return expectLogError(func() {
+			snapshotManager.PruneSnapshots("repository1", "repository1", []int{revision}, nil, nil, false, false, nil,
+				dryRun, false, false, 1)
+		})
+	}
+
+	writeLock(60)
+	if message := prune(1, true); message != "" {
+		t.Errorf("A dry run was blocked: %s", message)
+	}
+	if message := prune(1, false); !strings.Contains(message, "Another prune") {
+		t.Fatalf("A prune ran while another one held the lock: %q", message)
+	}
+	checkTestSnapshots(snapshotManager, 3, 0)
+
+	snapshotManager.IgnorePruneLock = true
+	if message := prune(1, false); message != "" {
+		t.Fatalf("Prune with -ignore-lock failed: %s", message)
+	}
+	snapshotManager.IgnorePruneLock = false
+	checkTestSnapshots(snapshotManager, 2, 2)
+
+	writeLock(pruneLockTimeout + 60)
+	if message := prune(2, false); message != "" {
+		t.Fatalf("A stale lock blocked prune: %s", message)
+	}
+	if exist, _, _, _ := snapshotManager.storage.GetFileInfo(0, pruneLockFile); exist {
+		t.Error("The lock was not removed after prune")
+	}
 }

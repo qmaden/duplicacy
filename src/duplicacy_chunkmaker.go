@@ -26,14 +26,18 @@ type ChunkMaker struct {
 	bufferStart int
 
 	minimumReached bool
-	hashSum uint64
-	chunk *Chunk
+	hashSum        uint64
+	chunk          *Chunk
 
 	config *Config
 
 	hashOnly      bool
 	hashOnlyChunk *Chunk
 
+	// With deferHashing, chunks are sent without their hash, which the receiver computes when first needed.  The
+	// chunker runs on one goroutine for the whole backup, so this moves the keyed hash of every byte to the
+	// goroutines that compress and upload the chunks.
+	deferHashing bool
 }
 
 // CreateChunkMaker creates a chunk maker.  'randomSeed' is used to generate the character-to-integer table needed by
@@ -131,6 +135,10 @@ func (maker *ChunkMaker) startNewChunk() (chunk *Chunk) {
 	} else {
 		maker.chunk = maker.config.GetChunk()
 		maker.chunk.Reset(true)
+		if maker.deferHashing {
+			maker.chunk.hasher = nil
+			maker.chunk.deferredHash = true
+		}
 	}
 	return
 }
@@ -140,6 +148,17 @@ func (maker *ChunkMaker) AddData(reader io.Reader, sendChunk func(*Chunk)) (int6
 	isEOF := false
 	fileSize := int64(0)
 	fileHasher := maker.config.NewFileHasher()
+	// A read-ahead reader computes the file hash on its own goroutine
+	provider, hashedByReader := reader.(fileHashProvider)
+	if hashedByReader {
+		fileHasher = &DummyHasher{}
+	}
+	fileHash := func() string {
+		if hashedByReader {
+			return provider.FileHash()
+		}
+		return hex.EncodeToString(fileHasher.Sum(nil))
+	}
 
 	// Move data from the buffer to the chunk.
 	fill := func(count int) {
@@ -189,7 +208,7 @@ func (maker *ChunkMaker) AddData(reader io.Reader, sendChunk func(*Chunk)) (int6
 			}
 
 			if isEOF {
-				return fileSize, hex.EncodeToString(fileHasher.Sum(nil))
+				return fileSize, fileHash()
 			}
 		}
 
@@ -233,7 +252,7 @@ func (maker *ChunkMaker) AddData(reader io.Reader, sendChunk func(*Chunk)) (int6
 				}
 				return 0, ""
 			} else if isEOF {
-				return fileSize, hex.EncodeToString(fileHasher.Sum(nil))
+				return fileSize, fileHash()
 			} else {
 				continue
 			}
@@ -300,7 +319,7 @@ func (maker *ChunkMaker) AddData(reader io.Reader, sendChunk func(*Chunk)) (int6
 		}
 
 		if isEOF {
-			return fileSize, hex.EncodeToString(fileHasher.Sum(nil))
+			return fileSize, fileHash()
 		}
 	}
 }

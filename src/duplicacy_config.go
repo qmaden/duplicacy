@@ -8,8 +8,8 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
@@ -17,15 +17,16 @@ import (
 	"encoding/pem"
 	"fmt"
 	"hash"
+	"io"
 	"os"
-	"strings"
+	"reflect"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
-	"io/ioutil"
-	"reflect"
 
-	blake2 "github.com/minio/blake2b-simd"
+	"golang.org/x/crypto/blake2b"
+	"golang.org/x/crypto/ssh"
 )
 
 // If encryption is turned off, use this key for HMAC-SHA256 or chunk ID generation etc.
@@ -41,8 +42,8 @@ var ZSTD_COMPRESSION_LEVEL_DEFAULT = 201
 var ZSTD_COMPRESSION_LEVEL_BETTER = 202
 var ZSTD_COMPRESSION_LEVEL_BEST = 203
 
-var ZSTD_COMPRESSION_LEVELS = map[string]int {
-    "fastest": ZSTD_COMPRESSION_LEVEL_FASTEST,
+var ZSTD_COMPRESSION_LEVELS = map[string]int{
+	"fastest": ZSTD_COMPRESSION_LEVEL_FASTEST,
 	"default": ZSTD_COMPRESSION_LEVEL_DEFAULT,
 	"better":  ZSTD_COMPRESSION_LEVEL_BETTER,
 	"best":    ZSTD_COMPRESSION_LEVEL_BEST,
@@ -54,8 +55,19 @@ var CONFIG_BANNER = "duplicacy\001"
 // The length of the salt used in the new format
 var CONFIG_SALT_LENGTH = 32
 
-// The default iterations for key derivation
-var CONFIG_DEFAULT_ITERATIONS = 16384
+// The default iterations for key derivation for new storages, following the current OWASP recommendation for
+// PBKDF2-HMAC-SHA256.  The number is stored in the config file, so existing storages are not affected.
+var CONFIG_DEFAULT_ITERATIONS = 600000
+
+// The fixed number of iterations of the old config format (static salt), and the default before this fork
+var CONFIG_LEGACY_ITERATIONS = 16384
+
+// Iteration counts below this are reported as weak
+var CONFIG_RECOMMENDED_MINIMUM_ITERATIONS = 100000
+
+// The largest iteration count accepted from a config file; a corrupted or crafted config could otherwise make the
+// key derivation run practically forever
+var CONFIG_MAXIMUM_ITERATIONS = 100000000
 
 type Config struct {
 	CompressionLevel int `json:"compression-level"`
@@ -84,13 +96,14 @@ type Config struct {
 	// for encrypting a non-chunk file
 	FileKey []byte `json:"-"`
 
-	// for erasure coding
-	DataShards int `json:'data-shards'`
-	ParityShards int `json:'parity-shards'`
+	// For erasure coding.  The original struct tags were malformed, so these fields have always been stored under
+	// their Go names; the explicit tags keep it that way for compatibility with existing config files.
+	DataShards   int `json:"DataShards"`
+	ParityShards int `json:"ParityShards"`
 
 	// for RSA encryption
 	rsaPrivateKey *rsa.PrivateKey
-	rsaPublicKey *rsa.PublicKey
+	rsaPublicKey  *rsa.PublicKey
 
 	chunkPool      chan *Chunk
 	numberOfChunks int32
@@ -102,17 +115,17 @@ type aliasedConfig Config
 
 type jsonableConfig struct {
 	*aliasedConfig
-	ChunkSeed string `json:"chunk-seed"`
-	HashKey   string `json:"hash-key"`
-	IDKey     string `json:"id-key"`
-	ChunkKey  string `json:"chunk-key"`
-	FileKey   string `json:"file-key"`
+	ChunkSeed    string `json:"chunk-seed"`
+	HashKey      string `json:"hash-key"`
+	IDKey        string `json:"id-key"`
+	ChunkKey     string `json:"chunk-key"`
+	FileKey      string `json:"file-key"`
 	RSAPublicKey string `json:"rsa-public-key"`
 }
 
 func (config *Config) MarshalJSON() ([]byte, error) {
 
-	publicKey := []byte {}
+	publicKey := []byte{}
 	if config.rsaPublicKey != nil {
 		publicKey, _ = x509.MarshalPKIXPublicKey(config.rsaPublicKey)
 	}
@@ -160,8 +173,9 @@ func (config *Config) UnmarshalJSON(description []byte) (err error) {
 		if err != nil {
 			return fmt.Errorf("Invalid RSA public key in the config: %v", err)
 		}
-		config.rsaPublicKey = parsedKey.(*rsa.PublicKey)
-		if config.rsaPublicKey == nil {
+		var ok bool
+		config.rsaPublicKey, ok = parsedKey.(*rsa.PublicKey)
+		if !ok || config.rsaPublicKey == nil {
 			return fmt.Errorf("Unsupported public key type %s in the config", reflect.TypeOf(parsedKey))
 		}
 	}
@@ -319,7 +333,8 @@ func (config *Config) NewKeyedHasher(key []byte) hash.Hash {
 	// only zlib compression was supported.  Later SHA256 was replaced by Blake2b and LZ4 was used
 	// for compression (with compression level set to 100).
 	if config.CompressionLevel >= DEFAULT_COMPRESSION_LEVEL {
-		hasher, err := blake2.New(&blake2.Config{Size: 32, Key: key})
+		// Keyed BLAKE2b-256, identical to what github.com/minio/blake2b-simd computed
+		hasher, err := blake2b.New256(key)
 		if err != nil {
 			LOG_ERROR("HASH_KEY", "Invalid hash key: %x", key)
 		}
@@ -364,7 +379,7 @@ func (config *Config) NewFileHasher() hash.Hash {
 	if SkipFileHash {
 		return &DummyHasher{}
 	} else if config.CompressionLevel >= DEFAULT_COMPRESSION_LEVEL {
-		hasher, _ := blake2.New(&blake2.Config{Size: 32})
+		hasher, _ := blake2b.New256(nil)
 		return hasher
 	} else {
 		return sha256.New()
@@ -382,10 +397,10 @@ func (config *Config) ComputeFileHash(path string, buffer []byte) string {
 	hasher := config.NewFileHasher()
 	defer file.Close()
 
-	count := 1
-	for count > 0 {
-		count, err = file.Read(buffer)
-		hasher.Write(buffer[:count])
+	// A read error must not produce the hash of a partial file
+	if _, err = io.CopyBuffer(hasher, file, buffer); err != nil {
+		LOG_WARN("FILE_HASH", "Failed to read %s: %v", path, err)
+		return ""
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil))
@@ -433,8 +448,8 @@ func DownloadConfig(storage Storage, password string) (config *Config, isEncrypt
 
 		if string(configFile.GetBytes()[:len(ENCRYPTION_BANNER)]) == ENCRYPTION_BANNER {
 			// This is the old config format with a static salt and a fixed number of iterations
-			masterKey = GenerateKeyFromPassword(password, DEFAULT_KEY, CONFIG_DEFAULT_ITERATIONS)
-			LOG_TRACE("CONFIG_FORMAT", "Using a static salt and %d iterations for key derivation", CONFIG_DEFAULT_ITERATIONS)
+			masterKey = GenerateKeyFromPassword(password, DEFAULT_KEY, CONFIG_LEGACY_ITERATIONS)
+			LOG_TRACE("CONFIG_FORMAT", "Using a static salt and %d iterations for key derivation", CONFIG_LEGACY_ITERATIONS)
 		} else if string(configFile.GetBytes()[:len(CONFIG_BANNER)]) == CONFIG_BANNER {
 			// This is the new config format with a random salt and a configurable number of iterations
 			encryptedLength := len(configFile.GetBytes()) - CONFIG_SALT_LENGTH - 4
@@ -443,6 +458,10 @@ func DownloadConfig(storage Storage, password string) (config *Config, isEncrypt
 			saltStart := configFile.GetBytes()[len(CONFIG_BANNER):]
 			iterations := binary.LittleEndian.Uint32(saltStart[CONFIG_SALT_LENGTH : CONFIG_SALT_LENGTH+4])
 			LOG_TRACE("CONFIG_ITERATIONS", "Using %d iterations for key derivation", iterations)
+			if uint64(iterations) > uint64(CONFIG_MAXIMUM_ITERATIONS) {
+				return nil, true, fmt.Errorf("The config file specifies %d iterations for key derivation, more than the maximum of %d",
+					iterations, CONFIG_MAXIMUM_ITERATIONS)
+			}
 			masterKey = GenerateKeyFromPassword(password, saltStart[:CONFIG_SALT_LENGTH], int(iterations))
 
 			// Copy to a temporary buffer to replace the banner and remove the salt and the number of riterations
@@ -479,7 +498,17 @@ func DownloadConfig(storage Storage, password string) (config *Config, isEncrypt
 
 }
 
-func UploadConfig(storage Storage, config *Config, password string, iterations int) bool {
+// configError carries the log id that UploadConfig reports a failure with.
+type configError struct {
+	logID string
+	err   error
+}
+
+func (e *configError) Error() string { return e.err.Error() }
+
+// SaveConfig encrypts the config with 'password' (if not empty) and uploads it to the storage as 'config'.
+// Unlike UploadConfig it returns errors instead of logging them, so that callers can recover from a failure.
+func SaveConfig(storage Storage, config *Config, password string, iterations int) error {
 
 	// This is the key to encrypt the config file.
 	var masterKey []byte
@@ -488,14 +517,23 @@ func UploadConfig(storage Storage, config *Config, password string, iterations i
 	if len(password) > 0 {
 
 		if len(password) < 8 {
-			LOG_ERROR("CONFIG_PASSWORD", "The password must be at least 8 characters")
-			return false
+			return &configError{"CONFIG_PASSWORD", fmt.Errorf("The password must be at least 8 characters")}
+		}
+		if iterations < 1 || iterations > CONFIG_MAXIMUM_ITERATIONS {
+			return &configError{"CONFIG_ITERATIONS", fmt.Errorf("The number of iterations must be between 1 and %d",
+				CONFIG_MAXIMUM_ITERATIONS)}
+		}
+		if len(password) < 12 {
+			LOG_WARN("CONFIG_PASSWORD", "A password of at least 12 characters is recommended")
+		}
+		if iterations < CONFIG_RECOMMENDED_MINIMUM_ITERATIONS {
+			LOG_WARN("CONFIG_ITERATIONS", "%d iterations is weak for key derivation; at least %d are recommended",
+				iterations, CONFIG_RECOMMENDED_MINIMUM_ITERATIONS)
 		}
 
 		_, err := rand.Read(salt)
 		if err != nil {
-			LOG_ERROR("CONFIG_KEY", "Failed to generate random salt: %v", err)
-			return false
+			return &configError{"CONFIG_KEY", fmt.Errorf("Failed to generate random salt: %v", err)}
 		}
 
 		masterKey = GenerateKeyFromPassword(password, salt, iterations)
@@ -503,8 +541,7 @@ func UploadConfig(storage Storage, config *Config, password string, iterations i
 
 	description, err := json.MarshalIndent(config, "", "    ")
 	if err != nil {
-		LOG_ERROR("CONFIG_MARSHAL", "Failed to marshal the config: %v", err)
-		return false
+		return &configError{"CONFIG_MARSHAL", fmt.Errorf("Failed to marshal the config: %v", err)}
 	}
 
 	// Although the default key is passed to the function call the key is not actually used since there is no need to
@@ -516,8 +553,7 @@ func UploadConfig(storage Storage, config *Config, password string, iterations i
 		// Encrypt the config file with masterKey.  If masterKey is nil then no encryption is performed.
 		err = chunk.Encrypt(masterKey, "", true)
 		if err != nil {
-			LOG_ERROR("CONFIG_CREATE", "Failed to create the config file: %v", err)
-			return false
+			return &configError{"CONFIG_CREATE", fmt.Errorf("Failed to create the config file: %v", err)}
 		}
 
 		// The new encrypted format for config is CONFIG_BANNER + salt + #iterations + encrypted content
@@ -533,22 +569,35 @@ func UploadConfig(storage Storage, config *Config, password string, iterations i
 		chunk.Reset(false)
 		chunk.Write(encrypted.Bytes())
 		if len(chunk.GetBytes()) != encryptedLength {
-			LOG_ERROR("CONFIG_CREATE", "Encrypted config has %d bytes instead of expected %d bytes", len(chunk.GetBytes()), encryptedLength)
+			return &configError{"CONFIG_CREATE", fmt.Errorf("Encrypted config has %d bytes instead of expected %d bytes",
+				len(chunk.GetBytes()), encryptedLength)}
 		}
 	}
 
 	err = storage.UploadFile(0, "config", chunk.GetBytes())
 	if err != nil {
-		LOG_ERROR("CONFIG_INIT", "Failed to configure the storage: %v", err)
-		return false
+		return &configError{"CONFIG_INIT", fmt.Errorf("Failed to configure the storage: %v", err)}
 	}
 
 	if IsTracing() {
 		config.Print()
 	}
+	return nil
+}
+
+func UploadConfig(storage Storage, config *Config, password string, iterations int) bool {
+
+	if err := SaveConfig(storage, config, password, iterations); err != nil {
+		logID := "CONFIG_INIT"
+		if e, ok := err.(*configError); ok {
+			logID = e.logID
+		}
+		LOG_ERROR(logID, "%v", err)
+		return false
+	}
 
 	for _, subDir := range []string{"chunks", "snapshots"} {
-		err = storage.CreateDirectory(0, subDir)
+		err := storage.CreateDirectory(0, subDir)
 		if err != nil {
 			LOG_ERROR("CONFIG_MKDIR", "Failed to create storage subdirectory: %v", err)
 		}
@@ -596,7 +645,7 @@ func (config *Config) loadRSAPublicKey(keyFile string) {
 
 	// keyFile may be the actually key, in which case we don't need to read from a file
 	if !strings.Contains(keyFile, "-----BEGIN") {
-		encodedKey, err = ioutil.ReadFile(keyFile)
+		encodedKey, err = os.ReadFile(keyFile)
 		if err != nil {
 			LOG_ERROR("BACKUP_KEY", "Failed to read the public key file: %v", err)
 			return
@@ -605,23 +654,23 @@ func (config *Config) loadRSAPublicKey(keyFile string) {
 
 	decodedKey, _ := pem.Decode(encodedKey)
 	if decodedKey == nil {
-		LOG_ERROR("RSA_PUBLIC", "unrecognized public key in %s", keyFile)
+		LOG_ERROR("RSA_PUBLIC", "unrecognized public key in %s", describeKeySource(keyFile))
 		return
 	}
 	if decodedKey.Type != "PUBLIC KEY" {
-		LOG_ERROR("RSA_PUBLIC", "Unsupported public key type %s in %s", decodedKey.Type, keyFile)
+		LOG_ERROR("RSA_PUBLIC", "Unsupported public key type %s in %s", decodedKey.Type, describeKeySource(keyFile))
 		return
 	}
 
 	parsedKey, err := x509.ParsePKIXPublicKey(decodedKey.Bytes)
 	if err != nil {
-		LOG_ERROR("RSA_PUBLIC", "Failed to parse the public key in %s: %v", keyFile, err)
+		LOG_ERROR("RSA_PUBLIC", "Failed to parse the public key in %s: %v", describeKeySource(keyFile), err)
 		return
 	}
 
 	key, ok := parsedKey.(*rsa.PublicKey)
 	if !ok {
-		LOG_ERROR("RSA_PUBLIC", "Unsupported public key type %s in %s", reflect.TypeOf(parsedKey), keyFile)
+		LOG_ERROR("RSA_PUBLIC", "Unsupported public key type %s in %s", reflect.TypeOf(parsedKey), describeKeySource(keyFile))
 		return
 	}
 
@@ -641,41 +690,22 @@ func (config *Config) loadRSAPrivateKey(keyFile string, passphrase string) {
 
 	// keyFile may be the actually key, in which case we don't need to read from a file
 	if !strings.Contains(keyFile, "-----BEGIN") {
-		encodedKey, err = ioutil.ReadFile(keyFile)
+		encodedKey, err = os.ReadFile(keyFile)
 		if err != nil {
 			LOG_ERROR("RSA_PRIVATE", "Failed to read the private key file: %v", err)
 			return
 		}
 	}
 
-	decodedKey, _ := pem.Decode(encodedKey)
-	if decodedKey == nil {
-		LOG_ERROR("RSA_PRIVATE", "unrecognized private key in %s", keyFile)
+	parsedKey, err := parseRSAPrivateKey(encodedKey, passphrase)
+	if err != nil {
+		LOG_ERROR("RSA_PRIVATE", "Failed to load the private key in %s: %v", describeKeySource(keyFile), err)
 		return
-	}
-	if decodedKey.Type != "RSA PRIVATE KEY" {
-		LOG_ERROR("RSA_PRIVATE", "Unsupported private key type %s in %s", decodedKey.Type, keyFile)
-		return
-	}
-
-	var decodedKeyBytes []byte
-	if passphrase != "" {
-		decodedKeyBytes, err = x509.DecryptPEMBlock(decodedKey, []byte(passphrase))
-	} else {
-		decodedKeyBytes = decodedKey.Bytes
-	}
-
-	var parsedKey interface{}
-	if parsedKey, err = x509.ParsePKCS1PrivateKey(decodedKeyBytes); err != nil {
-		if parsedKey, err = x509.ParsePKCS8PrivateKey(decodedKeyBytes); err != nil {
-			LOG_ERROR("RSA_PRIVATE", "Failed to parse the private key in %s: %v", keyFile, err)
-			return
-		}
 	}
 
 	key, ok := parsedKey.(*rsa.PrivateKey)
 	if !ok {
-		LOG_ERROR("RSA_PRIVATE", "Unsupported private key type %s in %s", reflect.TypeOf(parsedKey), keyFile)
+		LOG_ERROR("RSA_PRIVATE", "Unsupported private key type %s in %s", reflect.TypeOf(parsedKey), describeKeySource(keyFile))
 		return
 	}
 
@@ -705,4 +735,67 @@ func (config *Config) loadRSAPrivateKey(keyFile string, passphrase string) {
 	}
 
 	config.rsaPrivateKey = key
+}
+
+// parseRSAPrivateKey decodes a PEM-encoded private key.  Supported forms are the OpenSSH format (what ssh-keygen
+// writes; with a passphrase it uses bcrypt-pbkdf and AES), PKCS#1 ('RSA PRIVATE KEY') and unencrypted PKCS#8
+// ('PRIVATE KEY'), plus the legacy PEM encryption of PKCS#1 keys for compatibility.
+func parseRSAPrivateKey(encodedKey []byte, passphrase string) (interface{}, error) {
+	block, _ := pem.Decode(encodedKey)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM-encoded private key found")
+	}
+
+	switch block.Type {
+	case "OPENSSH PRIVATE KEY":
+		if passphrase == "" {
+			key, err := ssh.ParseRawPrivateKey(encodedKey)
+			if _, missing := err.(*ssh.PassphraseMissingError); missing {
+				return nil, fmt.Errorf("the key is encrypted and requires a passphrase")
+			}
+			return key, err
+		}
+		key, err := ssh.ParseRawPrivateKeyWithPassphrase(encodedKey, []byte(passphrase))
+		if err == x509.IncorrectPasswordError {
+			return nil, fmt.Errorf("incorrect passphrase")
+		}
+		return key, err
+
+	case "RSA PRIVATE KEY", "PRIVATE KEY":
+		keyBytes := block.Bytes
+		//lint:ignore SA1019 legacy PEM encryption must stay readable for existing keys
+		if x509.IsEncryptedPEMBlock(block) {
+			if passphrase == "" {
+				return nil, fmt.Errorf("the key is encrypted and requires a passphrase")
+			}
+			LOG_WARN("RSA_PRIVATE", "The private key uses the legacy PEM encryption, which is weak; consider converting "+
+				"it to the OpenSSH format with 'ssh-keygen -p -f <key file>'")
+			var err error
+			//lint:ignore SA1019 legacy PEM encryption must stay readable for existing keys
+			keyBytes, err = x509.DecryptPEMBlock(block, []byte(passphrase))
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt the key: %v", err)
+			}
+		}
+		key, err := x509.ParsePKCS1PrivateKey(keyBytes)
+		if err == nil {
+			return key, nil
+		}
+		return x509.ParsePKCS8PrivateKey(keyBytes)
+
+	case "ENCRYPTED PRIVATE KEY":
+		return nil, fmt.Errorf("encrypted PKCS#8 keys are not supported; convert the key to the OpenSSH format " +
+			"with 'ssh-keygen -p -f <key file>'")
+
+	default:
+		return nil, fmt.Errorf("unsupported key type %s", block.Type)
+	}
+}
+
+// describeKeySource names where a key came from for messages; a key passed inline must not end up in the logs.
+func describeKeySource(keyFile string) string {
+	if strings.Contains(keyFile, "-----BEGIN") {
+		return "the key provided inline"
+	}
+	return keyFile
 }

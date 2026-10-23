@@ -7,10 +7,8 @@ package duplicacy
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
-	"path"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -77,6 +75,24 @@ type Storage interface {
 
 	// Set the maximum transfer speeds.
 	SetRateLimits(downloadRateLimit int, uploadRateLimit int)
+}
+
+// threadLimitedStorage is implemented by storages that keep state per thread, such as one client per thread.
+// They can only be used with thread indexes below NumberOfThreads(), which is the 'threads' argument they were
+// created with; other storages can be used with any number of threads.
+type threadLimitedStorage interface {
+	NumberOfThreads() int
+}
+
+// usableThreads returns 'threads', or fewer if the storage only supports fewer.
+func usableThreads(storage Storage, threads int) int {
+	if limited, ok := storage.(threadLimitedStorage); ok && limited.NumberOfThreads() < threads {
+		threads = limited.NumberOfThreads()
+	}
+	if threads < 1 {
+		threads = 1
+	}
+	return threads
 }
 
 // These are the top-level directories where chunks are stored.  Normally every chunk goes under 'chunks', but
@@ -267,54 +283,6 @@ func (storage *StorageBase) findChunkUnderDirectory(threadIndex int, chunkID str
 	return "", false, 0, fmt.Errorf("Invalid chunk nesting setup")
 }
 
-func checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
-
-	if preferencePath == "" {
-		return fmt.Errorf("Can't verify SSH host since the preference path is not set")
-	}
-	hostFile := path.Join(preferencePath, "known_hosts")
-	file, err := os.OpenFile(hostFile, os.O_RDWR|os.O_CREATE, 0600)
-	if err != nil {
-		return err
-	}
-
-	defer file.Close()
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		return err
-	}
-
-	lineRegex := regexp.MustCompile(`^([^\s]+)\s+(.+)`)
-
-	keyString := string(ssh.MarshalAuthorizedKey(key))
-	keyString = strings.Replace(keyString, "\n", "", -1)
-	remoteAddress := remote.String()
-	if strings.HasSuffix(remoteAddress, ":22") {
-		remoteAddress = remoteAddress[:len(remoteAddress)-len(":22")]
-	}
-
-	for i, line := range strings.Split(string(content), "\n") {
-		matched := lineRegex.FindStringSubmatch(line)
-		if matched == nil {
-			continue
-		}
-
-		if matched[1] == remote.String() {
-			if keyString != matched[2] {
-				LOG_WARN("HOSTKEY_OLD", "The existing key for '%s' is %s (file %s, line %d)",
-					remote.String(), matched[2], hostFile, i)
-				LOG_WARN("HOSTKEY_NEW", "The new key is '%s'", keyString)
-				return fmt.Errorf("The host key for '%s' has changed", remote.String())
-			} else {
-				return nil
-			}
-		}
-	}
-
-	file.Write([]byte(remote.String() + " " + keyString + "\n"))
-	return nil
-}
-
 // CreateStorage creates a storage object based on the provide storage URL.
 func CreateStorage(preference Preference, resetPassword bool, threads int) (storage Storage) {
 
@@ -439,8 +407,19 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 				}
 			}
 
-			keyFile = GetPassword(preference, "ssh_key_file", "Enter the path of the private key file:",
-				true, resetPassword)
+			if len(signers) > 0 && keyFile == "" {
+				// The agent has keys; only use a key file that was set up before instead of asking for one
+				// (upstream #687)
+				keyFileKey := "ssh_key_file"
+				if preference.Name != "default" {
+					keyFileKey = preference.Name + "_" + keyFileKey
+				}
+				keyFile = keyringGet(keyFileKey)
+			} else {
+				keyFile = GetPassword(preference, "ssh_key_file",
+					"Enter the path of the SSH private key file for logging in to the server (not the RSA encryption key):",
+					true, resetPassword)
+			}
 
 			var keySigner ssh.Signer
 			var err error
@@ -449,7 +428,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 				LOG_INFO("SSH_PUBLICKEY", "No private key file is provided")
 			} else {
 				var content []byte
-				content, err = ioutil.ReadFile(keyFile)
+				content, err = os.ReadFile(keyFile)
 				if err != nil {
 					LOG_INFO("SSH_PUBLICKEY", "Failed to read the private key file: %v", err)
 				} else {
@@ -457,7 +436,8 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 					if err != nil {
 						if _, ok := err.(*ssh.PassphraseMissingError); ok {
 							LOG_TRACE("SSH_PUBLICKEY", "The private key file is encrypted")
-							passphrase = GetPassword(preference, "ssh_passphrase", "Enter the passphrase to decrypt the private key file:", false, resetPassword)
+							passphrase = GetPassword(preference, "ssh_passphrase",
+								fmt.Sprintf("Enter the passphrase of the SSH private key file %s:", keyFile), false, resetPassword)
 							if len(passphrase) == 0 {
 								LOG_INFO("SSH_PUBLICKEY", "No passphrase to descrypt the private key file %s", keyFile)
 							} else {
@@ -476,7 +456,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 						if stat, err := os.Stat(certFile); err == nil && !stat.IsDir() {
 							LOG_DEBUG("SSH_CERTIFICATE", "Attempting to use ssh certificate from file %s", certFile)
 							var content []byte
-							content, err = ioutil.ReadFile(certFile)
+							content, err = os.ReadFile(certFile)
 							if err != nil {
 								LOG_INFO("SSH_CERTIFICATE", "Failed to read ssh certificate file %s: %v", certFile, err)
 							} else {
@@ -517,7 +497,9 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		keyFileAuthMethods := []ssh.AuthMethod{
 			ssh.PublicKeysCallback(publicKeysCallback),
 		}
-		if keyFile != "" {
+		// Public keys come first when a key file is set up or an SSH agent is running, so that a password is only
+		// asked for if they don't work
+		if keyFile != "" || os.Getenv("SSH_AUTH_SOCK") != "" {
 			authMethods = append(keyFileAuthMethods, passwordAuthMethods...)
 		} else {
 			authMethods = append(passwordAuthMethods, keyFileAuthMethods...)
@@ -542,11 +524,14 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 			}
 		}
 
-		hostKeyChecker := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return checkHostKey(hostname, remote, key)
+		hostKeyChecker, hostKeyAlgorithms, err := newSFTPHostKeyChecker(net.JoinHostPort(server, strconv.Itoa(port)))
+		if err != nil {
+			LOG_ERROR("STORAGE_CREATE", "Failed to set up host key verification for %s: %v", storageURL, err)
+			return nil
 		}
 
-		sftpStorage, err := CreateSFTPStorage(matched[1] == "sftpc", server, port, username, storageDir, 2, authMethods, hostKeyChecker, threads)
+		sftpStorage, err := CreateSFTPStorage(matched[1] == "sftpc", server, port, username, storageDir, 2, authMethods,
+			hostKeyChecker, hostKeyAlgorithms, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the SFTP storage at %s: %v", storageURL, err)
 			return nil
@@ -585,7 +570,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 
 		accessKey := GetPassword(preference, "s3_id", "Enter S3 Access Key ID:", true, resetPassword)
-		secretKey := GetPassword(preference, "s3_secret", "Enter S3 Secret Access Key:", true, resetPassword)
+		secretKey := GetPassword(preference, "s3_secret", "Enter S3 Secret Access Key:", false, resetPassword)
 
 		var err error
 
@@ -646,7 +631,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 
 	} else if matched[1] == "dropbox" {
 		storageDir := matched[3] + matched[5]
-		token := GetPassword(preference, "dropbox_token", "Enter Dropbox refresh token:", true, resetPassword)
+		token := GetPassword(preference, "dropbox_token", "Enter Dropbox refresh token:", false, resetPassword)
 		dropboxStorage, err := CreateDropboxStorage(token, storageDir, 1, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the dropbox storage: %v", err)
@@ -659,7 +644,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		storageDir := matched[5]
 
 		accountID := GetPassword(preference, "b2_id", "Enter Backblaze account or application id:", true, resetPassword)
-		applicationKey := GetPassword(preference, "b2_key", "Enter corresponding Backblaze application key:", true, resetPassword)
+		applicationKey := GetPassword(preference, "b2_key", "Enter corresponding Backblaze application key:", false, resetPassword)
 
 		b2Storage, err := CreateB2Storage(accountID, applicationKey, "", bucket, storageDir, threads)
 		if err != nil {
@@ -677,7 +662,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		storageDir := matched[4]
 
 		accountID := GetPassword(preference, "b2_id", "Enter Backblaze account or application id:", true, resetPassword)
-		applicationKey := GetPassword(preference, "b2_key", "Enter corresponding Backblaze application key:", true, resetPassword)
+		applicationKey := GetPassword(preference, "b2_key", "Enter corresponding Backblaze application key:", false, resetPassword)
 
 		b2Storage, err := CreateB2Storage(accountID, applicationKey, downloadURL, bucket, storageDir, threads)
 		if err != nil {
@@ -697,7 +682,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 
 		prompt := fmt.Sprintf("Enter the Access Key for the Azure storage account %s:", account)
-		accessKey := GetPassword(preference, "azure_key", prompt, true, resetPassword)
+		accessKey := GetPassword(preference, "azure_key", prompt, false, resetPassword)
 
 		azureStorage, err := CreateAzureStorage(account, accessKey, container, threads)
 		if err != nil {
@@ -733,7 +718,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		// Handle writing directly to the root of the drive
 		// For gcd://driveid@/, driveid@ is match[3] not match[2]
 		if matched[2] == "" && strings.HasSuffix(matched[3], "@") {
-			matched[2], matched[3]  = matched[3], matched[2]
+			matched[2], matched[3] = matched[3], matched[2]
 		}
 		driveID := matched[2]
 		if driveID != "" {
@@ -753,7 +738,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		// Handle writing directly to the root of the drive
 		// For odb://drive_id@/, drive_id@ is match[3] not match[2]
 		if matched[2] == "" && strings.HasSuffix(matched[3], "@") {
-			matched[2], matched[3]  = matched[3], matched[2]
+			matched[2], matched[3] = matched[3], matched[2]
 		}
 		drive_id := matched[2]
 		if len(drive_id) > 0 {
@@ -761,17 +746,17 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 		storagePath := matched[3] + matched[4]
 		prompt := fmt.Sprintf("Enter the path of the OneDrive token file (downloadable from https://duplicacy.com/one_start):")
-		tokenFile := GetPassword(preference, matched[1] + "_token", prompt, true, resetPassword)
+		tokenFile := GetPassword(preference, matched[1]+"_token", prompt, true, resetPassword)
 
 		// client_id, just like tokenFile, can be stored in preferences
 		//prompt = fmt.Sprintf("Enter client_id for custom Azure app (if empty will use duplicacy.com one):")
-		client_id := GetPasswordFromPreference(preference, matched[1] + "_client_id")
+		client_id := GetPasswordFromPreference(preference, matched[1]+"_client_id")
 		client_secret := ""
 
 		if client_id != "" {
 			// client_secret should go into keyring
 			prompt = fmt.Sprintf("Enter client_secret for custom Azure app (if empty will use duplicacy.com one):")
-			client_secret = GetPassword(preference, matched[1] + "_client_secret", prompt, true, resetPassword)
+			client_secret = GetPassword(preference, matched[1]+"_client_secret", prompt, false, resetPassword)
 		}
 
 		oneDriveStorage, err := CreateOneDriveStorage(tokenFile, matched[1] == "odb", storagePath, threads, client_id, client_secret, drive_id)
@@ -780,9 +765,9 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 			return nil
 		}
 
-		SavePassword(preference, matched[1] + "_token", tokenFile)
+		SavePassword(preference, matched[1]+"_token", tokenFile)
 		if client_id != "" {
-			SavePassword(preference, matched[1] + "_client_secret", client_secret)
+			SavePassword(preference, matched[1]+"_client_secret", client_secret)
 		}
 		return oneDriveStorage
 	} else if matched[1] == "hubic" {
@@ -798,7 +783,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		return hubicStorage
 	} else if matched[1] == "swift" {
 		prompt := fmt.Sprintf("Enter the OpenStack Swift key:")
-		key := GetPassword(preference, "swift_key", prompt, true, resetPassword)
+		key := GetPassword(preference, "swift_key", prompt, false, resetPassword)
 		swiftStorage, err := CreateSwiftStorage(storageURL[8:], key, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the OpenStack Swift storage at %s: %v", storageURL, err)
@@ -825,7 +810,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 
 		prompt := fmt.Sprintf("Enter the WebDAV password:")
-		password := GetPassword(preference, "webdav_password", prompt, true, resetPassword)
+		password := GetPassword(preference, "webdav_password", prompt, false, resetPassword)
 		webDAVStorage, err := CreateWebDAVStorage(server, port, username, password, storageDir, useHTTP, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the WebDAV storage at %s: %v", storageURL, err)
@@ -837,7 +822,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		endpoint := matched[3]
 		storageDir := matched[5]
 		prompt := fmt.Sprintf("Enter the token for accessing the Storage Made Easy File Fabric storage:")
-		token := GetPassword(preference, "fabric_token", prompt, true, resetPassword)
+		token := GetPassword(preference, "fabric_token", prompt, false, resetPassword)
 		smeStorage, err := CreateFileFabricStorage(endpoint, token, storageDir, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the File Fabric storage at %s: %v", storageURL, err)
@@ -851,11 +836,11 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		storageDir := ""
 		index := strings.Index(bucket, "/")
 		if index >= 0 {
-			storageDir = bucket[index + 1:]
+			storageDir = bucket[index+1:]
 			bucket = bucket[:index]
 		}
-		apiKey := GetPassword(preference, "storj_key", "Enter the API access key:", true, resetPassword)
-		passphrase := GetPassword(preference, "storj_passphrase", "Enter the passphrase:", true, resetPassword)
+		apiKey := GetPassword(preference, "storj_key", "Enter the API access key:", false, resetPassword)
+		passphrase := GetPassword(preference, "storj_passphrase", "Enter the passphrase:", false, resetPassword)
 		storjStorage, err := CreateStorjStorage(satellite, apiKey, passphrase, bucket, storageDir, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the Storj storage at %s: %v", storageURL, err)
@@ -891,7 +876,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		storageDir = storageDir[index+1:]
 
 		prompt := fmt.Sprintf("Enter the SAMBA password:")
-		password := GetPassword(preference, "smb_password", prompt, true, resetPassword)
+		password := GetPassword(preference, "smb_password", prompt, false, resetPassword)
 		sambaStorage, err := CreateSambaStorage(server, port, username, password, shareName, storageDir, threads)
 		if err != nil {
 			LOG_ERROR("STORAGE_CREATE", "Failed to load the SAMBA storage at %s: %v", storageURL, err)
@@ -899,7 +884,6 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 		}
 		SavePassword(preference, "smb_password", password)
 		return sambaStorage
-
 
 	} else {
 		LOG_ERROR("STORAGE_CREATE", "The storage type '%s' is not supported", matched[1])

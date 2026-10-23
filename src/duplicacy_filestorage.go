@@ -7,14 +7,20 @@ package duplicacy
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// fileCopyBuffers holds 1 MiB buffers for reading chunk files
+var fileCopyBuffers = sync.Pool{New: func() interface{} {
+	buffer := make([]byte, 1<<20)
+	return &buffer
+}}
 
 // FileStorage is a local on-disk file storage implementing the Storage interface.
 type FileStorage struct {
@@ -23,6 +29,9 @@ type FileStorage struct {
 	isCacheNeeded   bool // Network storages require caching
 	storageDir      string
 	numberOfThreads int
+
+	directoryMode os.FileMode // permissions for new directories
+	fileMode      os.FileMode // permissions for new files
 }
 
 // CreateFileStorage creates a file storage.
@@ -54,6 +63,8 @@ func CreateFileStorage(storageDir string, isCacheNeeded bool, threads int) (stor
 		storageDir:      storageDir,
 		isCacheNeeded:   isCacheNeeded,
 		numberOfThreads: threads,
+		directoryMode:   0744,
+		fileMode:        0644,
 	}
 
 	// Random number fo generating the temporary chunk file suffix.
@@ -69,7 +80,7 @@ func (storage *FileStorage) ListFiles(threadIndex int, dir string) (files []stri
 
 	fullPath := path.Join(storage.storageDir, dir)
 
-	list, err := ioutil.ReadDir(fullPath)
+	list, err := readDirectory(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, nil
@@ -79,7 +90,7 @@ func (storage *FileStorage) ListFiles(threadIndex int, dir string) (files []stri
 
 	for _, f := range list {
 		name := f.Name()
-		if (f.IsDir() || f.Mode() & os.ModeSymlink != 0) && name[len(name)-1] != '/' {
+		if (f.IsDir() || f.Mode()&os.ModeSymlink != 0) && name[len(name)-1] != '/' {
 			name += "/"
 		}
 		files = append(files, name)
@@ -106,7 +117,7 @@ func (storage *FileStorage) MoveFile(threadIndex int, from string, to string) (e
 
 // CreateDirectory creates a new directory.
 func (storage *FileStorage) CreateDirectory(threadIndex int, dir string) (err error) {
-	err = os.Mkdir(path.Join(storage.storageDir, dir), 0744)
+	err = os.Mkdir(path.Join(storage.storageDir, dir), storage.directoryMode)
 	if err != nil && os.IsExist(err) {
 		return nil
 	} else {
@@ -138,7 +149,15 @@ func (storage *FileStorage) DownloadFile(threadIndex int, filePath string, chunk
 	}
 
 	defer file.Close()
-	if _, err = RateLimitedCopy(chunk, file, storage.DownloadRateLimit/storage.numberOfThreads); err != nil {
+	rate := storage.DownloadRateLimit / storage.numberOfThreads
+	if rate <= 0 {
+		// Read in large blocks rather than the 32 KiB that io.Copy uses
+		buffer := fileCopyBuffers.Get().(*[]byte)
+		defer fileCopyBuffers.Put(buffer)
+		_, err = io.CopyBuffer(chunk, struct{ io.Reader }{file}, *buffer)
+		return err
+	}
+	if _, err = RateLimitedCopy(chunk, file, rate); err != nil {
 		return err
 	}
 
@@ -160,12 +179,12 @@ func (storage *FileStorage) UploadFile(threadIndex int, filePath string, content
 			if !os.IsNotExist(err) {
 				return err
 			}
-			err = os.MkdirAll(dir, 0744)
+			err = os.MkdirAll(dir, storage.directoryMode)
 			if err != nil {
 				return err
 			}
 		} else {
-			if !stat.IsDir() && stat.Mode() & os.ModeSymlink == 0 {
+			if !stat.IsDir() && stat.Mode()&os.ModeSymlink == 0 {
 				return fmt.Errorf("The path %s is not a directory or symlink", dir)
 			}
 		}
@@ -179,13 +198,18 @@ func (storage *FileStorage) UploadFile(threadIndex int, filePath string, content
 
 	temporaryFile := fullPath + "." + string(suffix) + ".tmp"
 
-	file, err := os.OpenFile(temporaryFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	file, err := os.OpenFile(temporaryFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, storage.fileMode)
 	if err != nil {
 		return err
 	}
 
-	reader := CreateRateLimitedReader(content, storage.UploadRateLimit/storage.numberOfThreads)
-	_, err = io.Copy(file, reader)
+	if storage.UploadRateLimit <= 0 {
+		// One write per chunk: io.Copy would write 32 KiB at a time, which is very slow on SMR disks (upstream #670)
+		_, err = file.Write(content)
+	} else {
+		reader := CreateRateLimitedReader(content, storage.UploadRateLimit/storage.numberOfThreads)
+		_, err = io.Copy(file, reader)
+	}
 	if err != nil {
 		file.Close()
 		return err
@@ -217,6 +241,14 @@ func (storage *FileStorage) UploadFile(threadIndex int, filePath string, content
 	}
 
 	return nil
+}
+
+// makePrivate restricts the storage to its owner: new files and directories are only accessible by the owner, and
+// so is the top directory.  It is used for the snapshot cache, which holds decrypted metadata.
+func (storage *FileStorage) makePrivate() error {
+	storage.directoryMode = 0700
+	storage.fileMode = 0600
+	return os.Chmod(storage.storageDir, 0700)
 }
 
 // If a local snapshot cache is needed for the storage to avoid downloading/uploading chunks too often when
