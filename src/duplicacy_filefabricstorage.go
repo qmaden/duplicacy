@@ -94,7 +94,7 @@ func CreateFileFabricStorage(endpoint string, token string, storageDir string, t
 
 		endpoint:       endpoint,
 		authToken:      token,
-		client:         http.DefaultClient,
+		client:         newHTTPClient(threads),
 		threads:        threads,
 		directoryCache: make(map[string]string),
 		maxRetries:     12,

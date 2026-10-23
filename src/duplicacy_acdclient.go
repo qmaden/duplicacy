@@ -57,7 +57,7 @@ func NewACDClient(tokenFile string) (*ACDClient, error) {
 	}
 
 	client := &ACDClient{
-		HTTPClient: http.DefaultClient,
+		HTTPClient: newHTTPClient(0),
 		TokenFile:  tokenFile,
 		Token:      token,
 		TokenLock:  &sync.Mutex{},

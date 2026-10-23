@@ -59,7 +59,7 @@ func CreateWebDAVStorage(host string, port int, username string, password string
 		storageDir: "",
 		useHTTP:    useHTTP,
 
-		client:         http.DefaultClient,
+		client:         newHTTPClient(threads),
 		threads:        threads,
 		directoryCache: make(map[string]int),
 	}

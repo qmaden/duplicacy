@@ -65,7 +65,7 @@ func NewOneDriveClient(tokenFile string, isBusiness bool, client_id string, clie
 	}
 
 	client := &OneDriveClient{
-		HTTPClient: http.DefaultClient,
+		HTTPClient: newHTTPClient(0),
 		TokenFile:  tokenFile,
 		Token:      token,
 		OAConfig:   nil,

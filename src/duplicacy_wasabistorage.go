@@ -67,7 +67,7 @@ func CreateWasabiStorage(
 		storageDir: storageDir,
 		key:        accessKey,
 		secret:     secretKey,
-		client:     &http.Client{},
+		client:     newHTTPClient(threads),
 	}
 
 	wasabi.DerivedStorage = wasabi

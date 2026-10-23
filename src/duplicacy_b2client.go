@@ -92,7 +92,7 @@ func NewB2Client(applicationKeyID string, applicationKey string, downloadURL str
 	}
 
 	client := &B2Client{
-		HTTPClient:       http.DefaultClient,
+		HTTPClient:       newHTTPClient(threads),
 		ApplicationKeyID: applicationKeyID,
 		ApplicationKey:   applicationKey,
 		DownloadURL:      downloadURL,
