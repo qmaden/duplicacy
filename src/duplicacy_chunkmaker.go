@@ -139,6 +139,17 @@ func (maker *ChunkMaker) AddData(reader io.Reader, sendChunk func(*Chunk)) (int6
 	isEOF := false
 	fileSize := int64(0)
 	fileHasher := maker.config.NewFileHasher()
+	// A read-ahead reader computes the file hash on its own goroutine
+	provider, hashedByReader := reader.(fileHashProvider)
+	if hashedByReader {
+		fileHasher = &DummyHasher{}
+	}
+	fileHash := func() string {
+		if hashedByReader {
+			return provider.FileHash()
+		}
+		return hex.EncodeToString(fileHasher.Sum(nil))
+	}
 
 	// Move data from the buffer to the chunk.
 	fill := func(count int) {
@@ -188,7 +199,7 @@ func (maker *ChunkMaker) AddData(reader io.Reader, sendChunk func(*Chunk)) (int6
 			}
 
 			if isEOF {
-				return fileSize, hex.EncodeToString(fileHasher.Sum(nil))
+				return fileSize, fileHash()
 			}
 		}
 
@@ -232,7 +243,7 @@ func (maker *ChunkMaker) AddData(reader io.Reader, sendChunk func(*Chunk)) (int6
 				}
 				return 0, ""
 			} else if isEOF {
-				return fileSize, hex.EncodeToString(fileHasher.Sum(nil))
+				return fileSize, fileHash()
 			} else {
 				continue
 			}
@@ -299,7 +310,7 @@ func (maker *ChunkMaker) AddData(reader io.Reader, sendChunk func(*Chunk)) (int6
 		}
 
 		if isEOF {
-			return fileSize, hex.EncodeToString(fileHasher.Sum(nil))
+			return fileSize, fileHash()
 		}
 	}
 }

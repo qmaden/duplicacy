@@ -499,7 +499,13 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 			skippedFiles = append(skippedFiles, entry.Path)
 			continue
 		}
-		entry.Size, entry.Hash = fileChunkMaker.AddData(file, uploadChunkFunc)
+		if info, err := file.Stat(); err == nil && info.Size() >= readAheadThreshold {
+			readAhead := newReadAheadReader(file, manager.config.NewFileHasher())
+			entry.Size, entry.Hash = fileChunkMaker.AddData(readAhead, uploadChunkFunc)
+			readAhead.Close()
+		} else {
+			entry.Size, entry.Hash = fileChunkMaker.AddData(file, uploadChunkFunc)
+		}
 		if !showStatistics || IsTracing() || RunInBackground {
 			LOG_INFO("PACK_END", "Packed %s (%d)", entry.Path, entry.Size)
 		}
