@@ -78,6 +78,9 @@ type Chunk struct {
 	// encryption, where a metadata chunk is not encrypted by RSA
 
 	isBroken bool // Indicates the chunk did not download correctly. This is only used for -persist (allowFailures) mode
+
+	deferredHash bool // The hash is computed from the buffer when first needed rather than as data is written, so
+	// that it can be computed on another goroutine (see ChunkMaker.deferHashing)
 }
 
 // Magic word to identify a duplicacy format encrypted file, plus a version number.
@@ -163,6 +166,7 @@ func (chunk *Chunk) Reset(hashNeeded bool) {
 	chunk.size = 0
 	chunk.isMetadata = false
 	chunk.isBroken = false
+	chunk.deferredHash = false
 }
 
 // Write implements the Writer interface.
@@ -188,17 +192,28 @@ func (chunk *Chunk) Write(p []byte) (int, error) {
 // GetHash returns the chunk hash.
 func (chunk *Chunk) GetHash() string {
 	if len(chunk.hash) == 0 {
-		chunk.hash = chunk.hasher.Sum(nil)
+		chunk.computeHash()
 	}
 
 	return string(chunk.hash)
+}
+
+// computeHash sets the hash from the hasher, or for a chunk with a deferred hash, from the data in the buffer.
+func (chunk *Chunk) computeHash() {
+	if chunk.deferredHash {
+		hasher := chunk.config.NewKeyedHasher(chunk.config.HashKey)
+		hasher.Write(chunk.buffer.Bytes())
+		chunk.hash = hasher.Sum(nil)
+	} else {
+		chunk.hash = chunk.hasher.Sum(nil)
+	}
 }
 
 // GetID returns the chunk id.
 func (chunk *Chunk) GetID() string {
 	if len(chunk.id) == 0 {
 		if len(chunk.hash) == 0 {
-			chunk.hash = chunk.hasher.Sum(nil)
+			chunk.computeHash()
 		}
 
 		hasher := chunk.config.NewKeyedHasher(chunk.config.IDKey)

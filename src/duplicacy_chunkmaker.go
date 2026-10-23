@@ -33,6 +33,11 @@ type ChunkMaker struct {
 
 	hashOnly      bool
 	hashOnlyChunk *Chunk
+
+	// With deferHashing, chunks are sent without their hash, which the receiver computes when first needed.  The
+	// chunker runs on one goroutine for the whole backup, so this moves the keyed hash of every byte to the
+	// goroutines that compress and upload the chunks.
+	deferHashing bool
 }
 
 // CreateChunkMaker creates a chunk maker.  'randomSeed' is used to generate the character-to-integer table needed by
@@ -130,6 +135,10 @@ func (maker *ChunkMaker) startNewChunk() (chunk *Chunk) {
 	} else {
 		maker.chunk = maker.config.GetChunk()
 		maker.chunk.Reset(true)
+		if maker.deferHashing {
+			maker.chunk.hasher = nil
+			maker.chunk.deferredHash = true
+		}
 	}
 	return
 }

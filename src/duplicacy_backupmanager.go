@@ -376,6 +376,7 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 	}
 
 	fileChunkMaker := CreateFileChunkMaker(manager.config, false)
+	fileChunkMaker.deferHashing = true
 
 	keepUploadAlive := int64(1800)
 
@@ -457,30 +458,31 @@ func (manager *BackupManager) Backup(top string, quickMode bool, threads int, ta
 
 	chunkOperator.UploadCompletionFunc = uploadChunkCompletionFunc
 
+	// Chunks are hashed and checked against the chunk cache on the upload goroutines; chunkCacheLock guards the
+	// cache and lastUploadingTime until all file chunks are done
+	var chunkCacheLock sync.Mutex
+	chunkOperator.UploadFilter = func(chunk *Chunk) bool {
+		key := fileChunkDir + chunk.GetID()
+		chunkCacheLock.Lock()
+		defer chunkCacheLock.Unlock()
+
+		_, found := chunkCache[key]
+		if found && time.Now().Unix()-lastUploadingTime > keepUploadAlive {
+			LOG_INFO("UPLOAD_KEEPALIVE", "Skip chunk cache to keep connection alive")
+			found = false
+		}
+		if !found {
+			lastUploadingTime = time.Now().Unix()
+			chunkCache[key] = true
+		}
+		return found
+	}
+
 	chunkIndex := -1
 	// This function is called when the chunk maker generates a new chunk
 	uploadChunkFunc := func(chunk *Chunk) {
-		chunkID := chunk.GetID()
-		chunkSize := chunk.GetLength()
-
 		chunkIndex++
-
-		_, found := chunkCache[fileChunkDir+chunkID]
-		if found {
-			if time.Now().Unix()-lastUploadingTime > keepUploadAlive {
-				LOG_INFO("UPLOAD_KEEPALIVE", "Skip chunk cache to keep connection alive")
-				found = false
-			}
-		}
-
-		if found {
-			uploadChunkCompletionFunc(chunk, chunkIndex, true, chunkSize, 0)
-		} else {
-			lastUploadingTime = time.Now().Unix()
-			chunkCache[fileChunkDir+chunkID] = true
-
-			chunkOperator.Upload(chunk, chunkIndex, false)
-		}
+		chunkOperator.UploadUnhashed(chunk, chunkIndex)
 
 		if chunkIndex == chunkToFail {
 			LOG_ERROR("SNAPSHOT_FAIL", "Artificially fail the chunk %d for testing purposes", chunkToFail)

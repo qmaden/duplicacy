@@ -68,6 +68,10 @@ type ChunkOperator struct {
 	rewriteChunks bool // Whether to rewrite corrupted chunks when erasure coding is enabled
 
 	UploadCompletionFunc func(chunk *Chunk, chunkIndex int, inCache bool, chunkSize int, uploadSize int)
+
+	// For chunks added with UploadUnhashed: called on the worker once the chunk's id is known; returning true
+	// completes the chunk as already uploaded (inCache) without looking it up in the storage
+	UploadFilter func(chunk *Chunk) bool
 }
 
 // CreateChunkOperator creates a new ChunkOperator.
@@ -178,6 +182,12 @@ func (operator *ChunkOperator) download(chunkHash string, chunkIndex int, isMeta
 func (operator *ChunkOperator) DownloadAsync(chunkHash string, chunkIndex int, isMetadata bool, completionFunc func(*Chunk, int)) {
 	chunkID := operator.config.GetChunkIDFromHash(chunkHash)
 	operator.AddTask(ChunkOperationDownload, chunkID, chunkHash, "", chunkIndex, nil, isMetadata, false, completionFunc)
+}
+
+// UploadUnhashed uploads a file chunk whose hash hasn't been computed yet; the worker computes it and applies
+// UploadFilter before uploading.
+func (operator *ChunkOperator) UploadUnhashed(chunk *Chunk, chunkIndex int) {
+	operator.AddTask(ChunkOperationUpload, "", "", "", chunkIndex, chunk, false, false, nil)
 }
 
 func (operator *ChunkOperator) Upload(chunk *Chunk, chunkIndex int, isMetadata bool) {
@@ -534,6 +544,15 @@ func (operator *ChunkOperator) UploadChunk(threadIndex int, task ChunkTask) bool
 	chunk := task.chunk
 	chunkID := task.chunkID
 	chunkSize := chunk.GetLength()
+
+	if chunkID == "" {
+		// Added by UploadUnhashed: the hash is computed here rather than on the caller's goroutine
+		chunkID = chunk.GetID()
+		if operator.UploadFilter != nil && operator.UploadFilter(chunk) {
+			operator.UploadCompletionFunc(chunk, task.chunkIndex, true, chunkSize, 0)
+			return false
+		}
+	}
 
 	// The data in the buffer is checked against the chunk id by Encrypt() below
 
