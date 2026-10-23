@@ -1,95 +1,97 @@
-# Duplicacy: A lock-free deduplication cloud backup tool
+# Duplicacy (qmaden fork)
 
-Duplicacy is a new generation cross-platform cloud backup tool based on the idea of [Lock-Free Deduplication](https://github.com/gilbertchen/duplicacy/wiki/Lock-Free-Deduplication).
+Duplicacy is a command-line backup tool built on
+[lock-free deduplication](https://github.com/gilbertchen/duplicacy/wiki/Lock-Free-Deduplication): any number of
+computers can back up to the same cloud or local storage at the same time, identical data is stored once across
+all of them, and old backups can be pruned while others keep running, all without a lock server or a chunk
+database. The design is described in the paper published in
+[IEEE Transactions on Cloud Computing](https://ieeexplore.ieee.org/document/9310668)
+([draft PDF](duplicacy_paper.pdf)).
 
-Our paper explaining the inner workings of Duplicacy has been accepted by [IEEE Transactions on Cloud Computing](https://ieeexplore.ieee.org/document/9310668) and will appear in a future issue this year.  The final draft version is available [here](https://github.com/gilbertchen/duplicacy/blob/master/duplicacy_paper.pdf) for those who don't have IEEE subscriptions. 
+This repository is a maintained fork of [gilbertchen/duplicacy](https://github.com/gilbertchen/duplicacy) (CLI
+3.2.x). It fixes security and data-safety bugs, modernizes the toolchain and dependencies, and makes backup and
+restore faster, **while keeping the storage format unchanged**: storages written by upstream Duplicacy (CLI and
+GUI) are read by this fork, and storages written by this fork are read by them. Checked-in golden storages of every
+format are restored byte for byte in CI.
 
-This repository hosts source code, design documents, and binary releases of the command line version of Duplicacy.  There is also a Web GUI frontend built for Windows, macOS, and Linux, available from https://duplicacy.com.
+## What's different from upstream
 
-There is a special edition of Duplicacy developed for VMware vSphere (ESXi) named [Vertical Backup](https://www.verticalbackup.com) that can back up virtual machine files on ESXi to local drives, network or cloud storages.
+- **Restore safety**: snapshot paths are validated and symbolic links in the restore tree are never followed.
+- **SFTP**: host keys are verified against `known_hosts` by host name; ssh-agent keys are tried first.
+- **Encryption**: 600,000 PBKDF2 iterations for new storages, `password -iterations` to upgrade existing ones,
+  malformed chunks rejected without crashing.
+- **Correctness**: fixes to `check`, resume, prune retention and clock-skew handling, restore with `-delete`, the
+  separate metadata directory, and many races. `backup -strict` exits non-zero when files were skipped.
+- **Performance**: faster LZ4 and pooled zstd codecs, read-ahead and hashing on a second core, parallel metadata
+  downloads, prefetching across files on restore, automatic retries of failed chunk transfers, and a
+  `-memory-limit` option.
+- **Tooling**: Go 1.26.10 (Go 1.27 also builds), CI with race tests, fuzzing, staticcheck and govulncheck.
 
-## Features
+The full list is in [CHANGELOG.md](CHANGELOG.md); behaviour changes you may need to act on are in
+[docs/UPGRADING.md](docs/UPGRADING.md).
 
-There are 3 core advantages of Duplicacy over any other open-source or commercial backup tools:
+**Platforms**: Linux x86-64 and macOS (Apple Silicon and Intel). The Windows code is still in the tree but is not
+built or tested.
 
-* Duplicacy is the *only* cloud backup tool that allows multiple computers to back up to the same cloud storage, taking advantage of cross-computer deduplication whenever possible, without direct communication among them.  This feature turns any cloud storage server supporting only a basic set of file operations into a sophisticated deduplication-aware server.  
+## Build
 
-* Unlike other chunk-based backup tools where chunks are grouped into pack files and a chunk database is used to track which chunks are stored inside each pack file, Duplicacy takes a database-less approach where every chunk is saved independently using its hash as the file name to facilitate quick lookups.  The avoidance of a centralized chunk database not only produces a simpler and less error-prone implementation, but also makes it easier to develop advanced features, such as [Asymmetric Encryption](https://github.com/gilbertchen/duplicacy/wiki/RSA-encryption) for stronger encryption and [Erasure Coding](https://github.com/gilbertchen/duplicacy/wiki/Erasure-coding) for resilient data protection.
+Go 1.21 or later is enough to start; the pinned toolchain is downloaded automatically.
 
-* Duplicacy is fast.  While the performance wasn't the top-priority design goal, Duplicacy has been shown to outperform other backup tools by a considerable margin, as indicated by the following results obtained from a [benchmarking experiment](https://github.com/gilbertchen/benchmarking) backing up the [Linux code base](https://github.com/torvalds/linux) using Duplicacy and 3 other open-source backup tools.
+```bash
+go build -o duplicacy ./duplicacy
+```
 
-[![Comparison of Duplicacy, restic, Attic, duplicity](https://github.com/gilbertchen/duplicacy/blob/master/images/duplicacy_benchmark_speed.png "Comparison of Duplicacy, restic, Attic, duplicity")](https://github.com/gilbertchen/benchmarking)
+See [docs/BUILDING.md](docs/BUILDING.md) for release builds and cross-compiling.
 
+## Quick start
 
-## Getting Started
+```bash
+cd ~/Documents
+duplicacy init -e documents sftp://user@backup.example.com/backups   # -e: encrypt the storage
+duplicacy backup -stats
+duplicacy list
+duplicacy restore -r 1 -overwrite                                     # restore revision 1 in place
+duplicacy prune -keep 0:360 -keep 30:90 -keep 7:30 -keep 1:7
+```
 
-* [A brief introduction](https://github.com/gilbertchen/duplicacy/wiki/Quick-Start)
-* [Command references](https://github.com/gilbertchen/duplicacy/wiki)
-* [Building from source](https://github.com/gilbertchen/duplicacy/wiki/Installation)
+`init` turns the current directory into a *repository* with the snapshot id `documents`, backed up to the given
+storage. Credentials are prompted for and saved in the keyring, or can be passed through environment variables
+(see [docs/storage-backends.md](docs/storage-backends.md)). Read [docs/PRUNE_SAFETY.md](docs/PRUNE_SAFETY.md)
+before automating prune.
 
-## Storages
+## Storage backends
 
-Duplicacy currently provides the following storage backends:
+Local disk, SFTP, SMB, Amazon S3 and S3-compatible services (MinIO, Wasabi, DigitalOcean Spaces and others),
+Backblaze B2, Microsoft Azure, Google Cloud Storage, Google Drive, Microsoft OneDrive, Dropbox, OpenStack Swift,
+WebDAV (including pCloud and Box), Storj and File Fabric. URL formats and credentials:
+[docs/storage-backends.md](docs/storage-backends.md).
 
-* Local disk
-* SFTP
-* Dropbox
-* Amazon S3
-* Wasabi
-* DigitalOcean Spaces
-* Google Cloud Storage
-* Microsoft Azure
-* Backblaze B2
-* Google Drive
-* Microsoft OneDrive
-* Hubic
-* OpenStack Swift
-* WebDAV (under beta testing)
-* pcloud (via WebDAV)
-* Box.com (via WebDAV)
-* File Fabric by [Storage Made Easy](https://storagemadeeasy.com/)
+## Documentation
 
-Please consult the [wiki page](https://github.com/gilbertchen/duplicacy/wiki/Storage-Backends) on how to set up Duplicacy to work with each cloud storage.
+| Document | Contents |
+|----------|----------|
+| [docs/COMMANDS.md](docs/COMMANDS.md) | Every command and option (generated from the code) |
+| [docs/storage-backends.md](docs/storage-backends.md) | Storage URLs, credentials, environment variables |
+| [docs/PRUNE_SAFETY.md](docs/PRUNE_SAFETY.md) | How prune stays safe with concurrent backups, and how to keep it safe |
+| [docs/UPGRADING.md](docs/UPGRADING.md) | Behaviour changes that may need action |
+| [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) | What is protected against whom; known limits |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Code layout and data flow |
+| [docs/FORMAT.md](docs/FORMAT.md) | The storage format |
+| [docs/BUILDING.md](docs/BUILDING.md), [docs/TESTING.md](docs/TESTING.md) | Building and testing |
+| [docs/adr/](docs/adr/README.md) | Design decisions and their reasons |
+| [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md) | Rules for contributors and coding agents |
+| [SECURITY.md](SECURITY.md) | Reporting vulnerabilities |
 
-For reference, the following chart shows the running times (in seconds) of backing up the [Linux code base](https://github.com/torvalds/linux) to each of those supported storages:
+The [upstream wiki](https://github.com/gilbertchen/duplicacy/wiki) has more background and how-to guides; where it
+disagrees with the documents above, they describe this fork.
 
+## Comparison with other tools
 
-[![Comparison of Cloud Storages](https://github.com/gilbertchen/duplicacy/blob/master/images/duplicacy_benchmark_cloud.png "Comparison of Cloud Storages")](https://github.com/gilbertchen/cloud-storage-comparison)
-
-
-For complete benchmark results please visit https://github.com/gilbertchen/cloud-storage-comparison.
-
-## Comparison with Other Backup Tools
-
-[duplicity](http://duplicity.nongnu.org) works by applying the rsync algorithm (or more specific, the [librsync](https://github.com/librsync/librsync) library)
-to find the differences from previous backups and only then uploading the differences.  It is the only existing backup tool with extensive cloud support -- the [long list](http://duplicity.nongnu.org/duplicity.1.html#sect7) of storage backends covers almost every cloud provider one can think of.  However, duplicity's biggest flaw lies in its incremental model -- a chain of dependent backups starts with a full backup followed by a number of incremental ones, and ends when another full backup is uploaded.  Deleting one backup will render useless all the subsequent backups on the same chain.  Periodic full backups are required, in order to make previous backups disposable.
-
-[bup](https://github.com/bup/bup) also uses librsync to split files into chunks but save chunks in the git packfile format.  It doesn't support any cloud storage, or deletion of old backups.
-
-[Duplicati](https://duplicati.com) is one of the first backup tools that adopt the chunk-based approach to split files into chunks which are then uploaded to the storage.  The chunk-based approach got the incremental backup model right in the sense that every incremental backup is actually a full snapshot.  As Duplicati splits files into fixed-size chunks,  deletions or insertions of a few bytes will foil the deduplication.  Cloud support is extensive, but multiple clients can't back up to the same storage location.
-
-[Attic](https://attic-backup.org) has been acclaimed by some as the [Holy Grail of backups](https://www.stavros.io/posts/holy-grail-backups).  It follows the same incremental backup model like Duplicati but embraces the variable-size chunk algorithm for better performance and higher deduplication efficiency (not susceptible to byte insertion and deletion any more).  Deletions of old backup are also supported.  However, no cloud backends are implemented.  Although concurrent backups from multiple clients to the same storage is in theory possible by the use of locking, it is
-[not recommended](http://librelist.com/browser//attic/2014/11/11/backing-up-multiple-servers-into-a-single-repository/#e96345aa5a3469a87786675d65da492b) by the developer due to chunk indices being kept in a local cache.
-Concurrent access is not only a convenience; it is a necessity for better deduplication.  For instance, if multiple machines with the same OS installed can back up their entire drives to the same storage, only one copy of the system files needs to be stored, greatly reducing the storage space regardless of the number of machines.  Attic still adopts the traditional approach of using a centralized indexing database to manage chunks and relies heavily on caching to improve performance.  The presence of exclusive locking makes it hard to be extended to cloud storages.
-
-[restic](https://restic.github.io) is a more recent addition. It uses a format similar to the git packfile format.  Multiple clients backing up to the same storage are still guarded by
-[locks](https://github.com/restic/restic/blob/master/doc/Design.md#locks), and because a chunk database is used, deduplication isn't real-time (different clients sharing the same files will upload different copies of the same chunks).  A prune operation will completely block all other clients connected to the storage from doing their regular backups.  Moreover, since most cloud storage services do not provide a locking service, the best effort is to use some basic file operations to simulate a lock, but distributed locking is known to be a hard problem and it is unclear how reliable restic's lock implementation is.  A faulty implementation may cause a prune operation to accidentally delete data still in use, resulting in unrecoverable data loss.  This is the exact problem that we avoided by taking the lock-free approach.
-
-
-The following table compares the feature lists of all these backup tools:
-
-
-| Feature/Tool       | duplicity | bup | Duplicati         | Attic           | restic            | **Duplicacy** |
-|:------------------:|:---------:|:---:|:-----------------:|:---------------:|:-----------------:|:-------------:|
-| Incremental Backup | Yes       | Yes | Yes               | Yes             | Yes               | **Yes**       |
-| Full Snapshot      | No        | Yes | Yes               | Yes             | Yes               | **Yes**       |
-| Compression        | Yes       | Yes | Yes               | Yes             | No                | **Yes**       |
-| Deduplication      | Weak      | Yes | Weak              | Yes             | Yes               | **Yes**       |
-| Encryption         | Yes       | Yes | Yes               | Yes             | Yes               | **Yes**       |
-| Deletion           | No        | No  | Yes               | Yes             | No                | **Yes**       |
-| Concurrent Access  | No        | No  | No                | Not recommended | Exclusive locking | **Lock-free** |
-| Cloud Support      | Extensive | No  | Extensive         | No              | Limited           | **Extensive** |
-| Snapshot Migration | No        | No  | No                | No              | No                | **Yes**       |
+Duplicacy differs from tools such as restic, Borg, Kopia and Duplicati mainly in concurrency: chunks are stored as
+individual files named by their hash, with no index or lock, so several computers can back up to one storage
+concurrently and deduplicate against each other, and pruning doesn't block backups. The upstream README has a
+longer [comparison](https://github.com/gilbertchen/duplicacy#comparison-with-other-backup-tools) and
+[benchmarks](https://github.com/gilbertchen/benchmarking).
 
 ## License
 
