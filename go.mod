@@ -7,7 +7,9 @@ toolchain go1.26.10
 require (
 	cloud.google.com/go v0.38.0
 	github.com/aryann/difflib v0.0.0-20170710044230-e206f873d14a
-	github.com/aws/aws-sdk-go v1.55.8
+	github.com/aws/aws-sdk-go-v2 v1.47.4
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.10
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5
 	github.com/bkaradzic/go-lz4 v1.0.0
 	github.com/cloudsoda/go-smb2 v0.0.0-20260918041005-0c5d69b69701
 	github.com/gilbertchen/azure-sdk-for-go v14.1.2-0.20180323033227-8fd4663cab7c+incompatible
@@ -18,6 +20,7 @@ require (
 	github.com/gilbertchen/gopass v0.0.0-20170109162249-bf9dde6d0d2c
 	github.com/gilbertchen/keyring v0.0.0-20221004152639-1661cbebc508
 	github.com/gilbertchen/xattr v0.0.0-20160926155429-68e7a6806b01
+	github.com/johannesboyne/gofakes3 v1.2.0
 	github.com/klauspost/compress v1.20.3
 	github.com/klauspost/reedsolomon v1.9.9
 	github.com/minio/highwayhash v1.0.2
@@ -36,6 +39,15 @@ require (
 
 require (
 	github.com/Azure/go-autorest v10.15.5+incompatible // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.24 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.7 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.7 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.7 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.22 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.8 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.7 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.7 // indirect
+	github.com/aws/smithy-go v1.28.6 // indirect
 	github.com/calebcase/tmpfile v1.0.3 // indirect
 	github.com/cloudsoda/sddl v0.0.0-20250224235906-926454e91efc // indirect
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible // indirect
@@ -55,7 +67,6 @@ require (
 	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
 	github.com/jcmturner/gokrb5/v8 v8.4.4 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
-	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/jtolio/eventkit v0.0.0-20221004135224-074cf276595b // indirect
 	github.com/jtolio/noiseconn v0.0.0-20230111204749-d7ec1a08b0b8 // indirect
 	github.com/klauspost/cpuid v1.3.1 // indirect
@@ -64,6 +75,7 @@ require (
 	github.com/marstr/guid v1.1.0 // indirect
 	github.com/mmcloughlin/avo v0.0.0-20200803215136-443f81d77104 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/ryszard/goskiplist v0.0.0-20150312221310-2dfbae5fcf46 // indirect
 	github.com/satori/go.uuid v1.2.0 // indirect
 	github.com/segmentio/go-env v1.1.0 // indirect
 	github.com/spacemonkeygo/monkit/v3 v3.0.22 // indirect
@@ -73,6 +85,7 @@ require (
 	github.com/zeebo/blake3 v0.2.3 // indirect
 	github.com/zeebo/errs v1.3.0 // indirect
 	go.opencensus.io v0.22.3 // indirect
+	go.shabbyrobe.org/gocovmerge v0.0.0-20230507111327-fa4f82cfbf4d // indirect
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
