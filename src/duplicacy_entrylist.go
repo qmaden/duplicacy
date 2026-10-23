@@ -54,6 +54,7 @@ type EntryList struct {
 	Checksum string // checksum of all entries to detect disk corruption
 
 	maximumInMemoryEntries int    // max in-memory entries
+	inMemoryBytes          int64  // estimated memory used by the in-memory entries
 	NumberOfEntries        int64  // number of entries (not including directories and links)
 	cachePath              string // the directory for the on-disk file
 
@@ -105,7 +106,19 @@ func (entryList *EntryList) createOnDiskFile() error {
 			return err
 		}
 	}
+
+	// The entries are read back from the file from now on
+	entryList.entries = nil
+	entryList.inMemoryBytes = 0
 	return nil
+}
+
+// Entries are moved to disk once they use this much memory (estimated), whatever -max-in-memory-entries says
+var maximumInMemoryEntryBytes = int64(128 << 20)
+
+// entryMemorySize estimates the memory an in-memory entry uses: its strings plus the struct and the slice pointer.
+func entryMemorySize(entry *Entry) int64 {
+	return int64(len(entry.Path)+len(entry.Link)+len(entry.Hash)) + 160
 }
 
 // Add an entry to the entry list
@@ -132,7 +145,9 @@ func (entryList *EntryList) AddEntry(entry *Entry) error {
 		return entry.EncodeWithHash(entryList.encoder)
 	} else {
 		entryList.entries = append(entryList.entries, entry)
-		if entryList.maximumInMemoryEntries >= 0 && len(entryList.entries) > entryList.maximumInMemoryEntries {
+		entryList.inMemoryBytes += entryMemorySize(entry)
+		if (entryList.maximumInMemoryEntries >= 0 && len(entryList.entries) > entryList.maximumInMemoryEntries) ||
+			entryList.inMemoryBytes > maximumInMemoryEntryBytes {
 			err := entryList.createOnDiskFile()
 			if err != nil {
 				return err
@@ -375,19 +390,11 @@ func (entryList *EntryList) SaveIncompleteSnapshot() {
 	defer entryList.uploadedChunkLock.Unlock()
 
 	if entryList.onDiskFile == nil {
+		// This writes the in-memory entries to the file (they used to be written a second time here)
 		err := entryList.createOnDiskFile()
 		if err != nil {
 			LOG_WARN("INCOMPLETE_SAVE", "Failed to create the incomplete snapshot file: %v", err)
 			return
-		}
-
-		for _, entry := range entryList.entries {
-
-			err = entry.EncodeWithHash(entryList.encoder)
-			if err != nil {
-				LOG_WARN("INCOMPLETE_SAVE", "Failed to save the entry %s: %v", entry.Path, err)
-				return
-			}
 		}
 	}
 
