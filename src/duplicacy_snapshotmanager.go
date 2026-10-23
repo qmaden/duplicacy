@@ -311,8 +311,9 @@ func (manager *SnapshotManager) CreateChunkOperator(resurrect bool, rewriteChunk
 
 // DownloadSequence returns the content represented by a sequence of chunks.
 func (manager *SnapshotManager) DownloadSequence(sequence []string) (content []byte) {
-	// Metadata chunks are small and many, so several are downloaded at once
-	manager.CreateChunkOperator(false, false, metadataDownloadThreads, false)
+	// Metadata chunks are small and many, so several are downloaded at once, but never on more threads than the
+	// storage was created for
+	manager.CreateChunkOperator(false, false, usableThreads(manager.storage, metadataDownloadThreads), false)
 	downloader := manager.chunkOperator.NewSequenceDownloader(sequence, true)
 	for range sequence {
 		chunk := downloader.Next()

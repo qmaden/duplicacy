@@ -50,6 +50,9 @@ type GCDStorage struct {
 	TestMode            bool
 }
 
+// NumberOfThreads returns the number of threads the storage keeps per-thread state for.
+func (storage *GCDStorage) NumberOfThreads() int { return len(storage.backoffs) }
+
 type GCDConfig struct {
 	ClientID     string          `json:"client_id"`
 	ClientSecret string          `json:"client_secret"`

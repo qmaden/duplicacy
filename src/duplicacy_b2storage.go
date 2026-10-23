@@ -14,6 +14,9 @@ type B2Storage struct {
 	client *B2Client
 }
 
+// NumberOfThreads returns the number of threads the storage keeps per-thread state for.
+func (storage *B2Storage) NumberOfThreads() int { return len(storage.client.UploadURLs) }
+
 // CreateB2Storage creates a B2 storage object.
 func CreateB2Storage(accountID string, applicationKey string, downloadURL string, bucket string, storageDir string, threads int) (storage *B2Storage, err error) {
 

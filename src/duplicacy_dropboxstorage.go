@@ -20,6 +20,9 @@ type DropboxStorage struct {
 	storageDir     string
 }
 
+// NumberOfThreads returns the number of threads the storage keeps per-thread state for.
+func (storage *DropboxStorage) NumberOfThreads() int { return len(storage.clients) }
+
 // CreateDropboxStorage creates a dropbox storage object.
 func CreateDropboxStorage(refreshToken string, storageDir string, minimumNesting int, threads int) (storage *DropboxStorage, err error) {
 

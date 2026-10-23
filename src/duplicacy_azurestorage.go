@@ -17,6 +17,9 @@ type AzureStorage struct {
 	containers []*storage.Container
 }
 
+// NumberOfThreads returns the number of threads the storage keeps per-thread state for.
+func (storage *AzureStorage) NumberOfThreads() int { return len(storage.containers) }
+
 func CreateAzureStorage(accountName string, accountKey string,
 	containerName string, threads int) (azureStorage *AzureStorage, err error) {
 

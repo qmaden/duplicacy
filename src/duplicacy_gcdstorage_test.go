@@ -5,6 +5,7 @@
 package duplicacy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -261,5 +264,57 @@ func TestGCDListFilesWithUncachedDirectory(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("ListFiles didn't return")
+	}
+}
+
+// Storages that keep per-thread state can only be used with as many threads as they were created with.  The
+// snapshot manager downloaded metadata on 4 threads whatever the storage allowed, so with -threads 1 (the default,
+// and always for list, cat, diff and history) Google Drive panicked on every call, and Azure, Dropbox and S3C on
+// metadata downloads.
+func TestBackupAndRestoreOnOneThreadStorage(t *testing.T) {
+	setTestingT(t)
+	SetLoggingLevel(ERROR)
+	defer catchFixtureException(t)
+	server := newFakeDrive()
+	t.Cleanup(server.Close)
+
+	storage := createFakeGCDStorage(t, server, "", "one-thread", 1)
+	if !ConfigStorage(storage, CONFIG_DEFAULT_ITERATIONS, DEFAULT_COMPRESSION_LEVEL, 4096, 16384, 1024, "", nil, false, "", 0, 0) {
+		t.Fatal("Failed to initialize the storage")
+	}
+
+	repository := t.TempDir()
+	for i := 0; i < 20; i++ {
+		os.WriteFile(filepath.Join(repository, fmt.Sprintf("file%02d", i)), compressionTestData(5000, int64(i), 1), 0600)
+	}
+	os.MkdirAll(filepath.Join(repository, DUPLICACY_DIRECTORY), 0700)
+	SetDuplicacyPreferencePath(filepath.Join(repository, DUPLICACY_DIRECTORY))
+	manager := CreateBackupManager("test", storage, repository, "", "", "", false)
+	manager.SetupSnapshotCache("default")
+	for revision := 1; revision <= 2; revision++ {
+		os.WriteFile(filepath.Join(repository, "changing"), compressionTestData(9000, int64(100+revision), 1), 0600)
+		if !manager.Backup(repository, false, 1, "", false, false, 0, false, 1024, 1024) {
+			t.Fatal("Backup failed")
+		}
+	}
+
+	top := t.TempDir()
+	os.MkdirAll(filepath.Join(top, DUPLICACY_DIRECTORY), 0700)
+	SetDuplicacyPreferencePath(filepath.Join(top, DUPLICACY_DIRECTORY))
+	storage = createFakeGCDStorage(t, server, "", "one-thread", 1)
+	manager = CreateBackupManager("test", storage, top, "", "", "", false)
+	manager.SetupSnapshotCache("default")
+	if failed := manager.Restore(top, 2, true, false, 1, false, false, false, false, nil, false); failed != 0 {
+		t.Fatalf("%d files failed to restore", failed)
+	}
+	for _, name := range []string{"file00", "file19", "changing"} {
+		expected, _ := os.ReadFile(filepath.Join(repository, name))
+		restored, err := os.ReadFile(filepath.Join(top, name))
+		if err != nil || !bytes.Equal(expected, restored) {
+			t.Errorf("%s was not restored correctly: %v", name, err)
+		}
+	}
+	if listed := manager.SnapshotManager.ListSnapshots("test", nil, "", true, false); listed != 2 {
+		t.Errorf("Listed %d snapshots instead of 2", listed)
 	}
 }

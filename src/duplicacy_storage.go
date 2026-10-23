@@ -77,6 +77,24 @@ type Storage interface {
 	SetRateLimits(downloadRateLimit int, uploadRateLimit int)
 }
 
+// threadLimitedStorage is implemented by storages that keep state per thread, such as one client per thread.
+// They can only be used with thread indexes below NumberOfThreads(), which is the 'threads' argument they were
+// created with; other storages can be used with any number of threads.
+type threadLimitedStorage interface {
+	NumberOfThreads() int
+}
+
+// usableThreads returns 'threads', or fewer if the storage only supports fewer.
+func usableThreads(storage Storage, threads int) int {
+	if limited, ok := storage.(threadLimitedStorage); ok && limited.NumberOfThreads() < threads {
+		threads = limited.NumberOfThreads()
+	}
+	if threads < 1 {
+		threads = 1
+	}
+	return threads
+}
+
 // These are the top-level directories where chunks are stored.  Normally every chunk goes under 'chunks', but
 // if the 'nesting' file turns on the 'separate-metadata' option then metadata chunks will be stored under
 // 'metadata' instead, so that a different (usually cheaper and slower) storage class can be applied to
