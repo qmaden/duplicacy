@@ -55,6 +55,17 @@ regression test that fails without it, where one was practical. The full suite p
 | docs | `docs/ARCHITECTURE.md`, `docs/PRUNE_SAFETY.md`, `docs/adr/` (5 ADRs) | `2818166` |
 | docs | README rewritten for the fork; DESIGN.md and GUIDE.md point to the in-repo docs | `a7fd7f7` |
 | docs | CHANGELOG, UPGRADING and TESTING updated for phases 4 and 5 | `e49e36d` |
+| 5 | msgpack v4 → v5 (v4 bytes recorded; stored data byte-identical; cross-build restores) | `1c3cdb2` |
+| 5 | aws-sdk-go v1 → v2 for S3/MinIO/Wasabi; snapshot-id listing past 1,000 fixed | `830b7fa` |
+| 5 | Google API v0.21 → v0.308; GCS on the JSON API client (+2.6 MB, not +19 MB); failed GCS uploads now reported | `03432dc` |
+| 5 | Google Drive: listing hang and backoff data race (found with the new fake) | `cc85e69` |
+| 5 | Metadata downloads capped to the storage's threads (regression from `83ae8f0`, found with the new fake) | `d1bd3e2` |
+| 5 | Azure fork → official azblob (removes go-autorest, dgrijalva/jwt-go); pinned to v1.8.0 to avoid Apache Arrow | `ae25bc8`, `8353993` |
+| 5 | CI job: storage, backup, prune and copy tests against S3/GCS/Drive fakes and Azurite | `ba84177` |
+| 4 | I3 restore attribute pool (8 goroutines) | `910c612` |
+| 4 | C3b chunk hashing and dedup on the upload goroutines | `bcbcfcc` |
+| 4 | M3 entry list spills at ~128 MiB; released after spilling; incomplete snapshot no longer saved twice | `9556a57` |
+| docs | Docs and ADR 0006 for the SDKs, C3b, I3; ACKNOWLEDGEMENTS regenerated | `e61e0a7`, `d034c60` |
 
 **Phase 4 measurements** (1.1 GB, 20,000 files, encrypted LZ4, local storage, `-threads 4`, Apple M-series):
 
@@ -68,9 +79,15 @@ regression test that fails without it, where one was practical. The full suite p
 | M2 | 200,000 small files on macOS: peak RSS 743 → 198 MB, CPU 16.8 → 14.4 s |
 | M5 | Same tree with `-memory-limit 100`: 197 → 130 MB for about 10% more CPU |
 | P7 | `TestPruneMultipleThread` 79.3 → 4.5 s |
+| C3b | 2 GB of random data, 16 files: wall 6.52–6.83 → 3.86–3.88 s (−41%) at the same CPU; peak RSS 298–330 → 342–406 MB; identical chunks |
+| I3 | Restore of 50,000 small files (half with an xattr): 7.78 → 6.52 s (−16%); every file's mode and time match |
+| P6 (tried, reverted) | Dropping grown buffers instead of pooling them: peak RSS 140–154 → 158–164 MB, wall unchanged |
+| P8 (measured, not changed) | Chunk id computation: 0.5 µs per chunk, about 0.005% of the work per 4 MiB chunk |
 
-Against the section 9.5 targets: backup is 1.3–1.6× faster in wall time than the 7.1–8.7 s baseline (target 1.5×)
-and peak RSS is about 65–75% of baseline (target 60%); C3b and M4 address the rest. Restore of many small files from a local storage is
+Against the section 9.5 targets: with C3a and C3b, backup wall time is roughly halved on fast storage (target
+1.5×). Peak RSS stayed at about 65–75% of baseline until C3b, which trades some of it back (the upload queue now
+stays full); `-memory-limit` bounds it where memory matters more than speed. Restore of many small files is 16%
+faster from I3 on top of the earlier gains; the rest is writing file contents, which must follow the chunk order. Restore of many small files from a local storage is
 still bound by per-file syscalls (the I3 worker pool is deferred).
 
 **New findings while implementing:**
@@ -104,22 +121,23 @@ More findings from Phase 3:
   entry list. Errors on the first read are rare on Linux and macOS.
 - N10 is done (`94e121f`). N9 (resume for incremental backups): the incomplete snapshot is only written in hash
   mode, and making quick-mode backups resumable changes when entries are marked complete; needs its own design.
-- N11 (closing idle S3 connections on exit, #688) and N12 (B2 v3/v4 API): need testing against the real services.
+- N11 (closing idle S3 connections on exit, #688): with `aws-sdk-go-v2` and the shared HTTP client, connections
+  are closed when the process exits; what remains of #688 is server-side and needs a real service to reproduce.
+- N12 (B2 v3/v4 API): the B2 client is custom HTTP code; the v1 API is still supported by Backblaze, and moving
+  needs testing against B2 (or a B2 fake, which doesn't exist yet).
 - P4 (`CleanSnapshotCache` HEAD storm): no change needed. The storage is only asked about sequence chunks missing
   from the local cache, not once per chunk per snapshot as first thought.
-- C3b (chunk hashing in the upload workers): moves the dedup check off the chunker goroutine, touching the code
-  that the B2 fix and C3a just changed; worth doing once those have been used for a while. The chunk hash is
-  still computed on the chunker goroutine, which remains the backup bottleneck on fast storage.
-- M3 (memory-based `-max-in-memory-entries`) and M4 / P6 (pools sized by `threads` instead of `NumCPU()*16`):
-  after M1 and M2 the pools hold average-sized buffers and entries no longer carry attributes, so the remaining
-  gain is small except on many-core hosts.
-- I3 restore worker pool and direct writes: the CLI restores in place, so the rename is already skipped for
-  in-place updates; a worker pool for per-file syscalls needs care with directory times and ordering.
-- I2 `fadvise` hints, I4, C5, P5, P8, W2 (S3 listing cache), W4 (`ListObjectsV2`, PR #655): small or need a real
-  backend to measure.
-- Phase 5 leftovers: aws-sdk-go v2, msgpack v5, the Google API / gRPC upgrade (250+ releases, needs real GCS and
-  Google Drive testing; carries the remaining non-reachable govulncheck findings), and the Azure SDK fork with the
-  unmaintained `dgrijalva/jwt-go`. govulncheck reports no reachable vulnerabilities.
+- M4 / P6 (pool sizing, dropping grown buffers): measured, no gain (see above); the pools only ever hold as many
+  chunks as are in flight, which depends on `-threads`, not on `NumCPU()`.
+- P8: measured, negligible (see above).
+- I4 is already the case: attributes are only touched when the entry has some.
+- I2 `fadvise` hints, C5, P5 (chunk-existence index), W2 (S3 listing cache), W4 (`ListObjectsV2`, PR #655): need
+  a real backend or a spinning disk to measure; `ListObjectsV2` also risks S3-compatible services that lack it.
+- The goamz client behind `s3c://` is kept as the fallback for endpoints `aws-sdk-go-v2` doesn't work with.
+- Cloud backends are tested against fakes and emulators (and versitygw for S3); none of the SDK changes has been
+  run against Amazon S3, Wasabi, Google or Azure themselves. Do that before a release.
+- govulncheck: no known vulnerability in the packages Duplicacy imports; one in `golang.org/x/crypto` (GO-2026-5932,
+  no fix released) is in a package Duplicacy doesn't use.
 
 ## 0. What was done
 
