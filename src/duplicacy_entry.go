@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -711,12 +710,12 @@ func ListEntries(top string, path string, patterns []string, nobackupFile string
 
 	files := make([]os.FileInfo, 0, 1024)
 
-	files, err = ioutil.ReadDir(fullPath)
+	files, err = readDirectory(fullPath)
 	if err != nil {
 		return directoryList, nil, err
 	}
 
-	// This binary search works because ioutil.ReadDir returns files sorted by Name() by default
+	// This binary search works because readDirectory returns files sorted by Name() by default
 	if nobackupFile != "" {
 		ii := sort.Search(len(files), func(ii int) bool { return strings.Compare(files[ii].Name(), nobackupFile) >= 0 })
 		if ii < len(files) && files[ii].Name() == nobackupFile {

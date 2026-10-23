@@ -31,8 +31,7 @@ type ChunkDownloadCompletion struct {
 type ChunkDownloader struct {
 	operator *ChunkOperator
 
-	totalChunkSize      int64 // Total chunk size
-	downloadedChunkSize int64 // Downloaded chunk size
+	totalChunkSize int64 // Total chunk size
 
 	taskList       []ChunkDownloadTask // The list of chunks to be downloaded
 	completedTasks map[int]bool        // Store downloaded chunks

@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -499,7 +498,7 @@ func (client *B2Client) ListFileNames(threadIndex int, startFileName string, sin
 			return nil, err
 		}
 
-		ioutil.ReadAll(readCloser)
+		io.ReadAll(readCloser)
 
 		for _, file := range output.Files {
 			file.FileName = file.FileName[len(client.StorageDir):]

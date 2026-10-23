@@ -7,7 +7,6 @@ package duplicacy
 import (
 	"bytes"
 	"encoding/json"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -165,7 +164,7 @@ func TestEntryOrder(t *testing.T) {
 			continue
 		}
 
-		err := ioutil.WriteFile(fullPath, []byte(file), 0700)
+		err := os.WriteFile(fullPath, []byte(file), 0700)
 		if err != nil {
 			t.Errorf("WriteFile(%s) returned an error: %s", fullPath, err)
 		}
@@ -264,7 +263,7 @@ func TestEntryExcludeByAttribute(t *testing.T) {
 			continue
 		}
 
-		err := ioutil.WriteFile(fullPath, []byte(file), 0700)
+		err := os.WriteFile(fullPath, []byte(file), 0700)
 		if err != nil {
 			t.Errorf("WriteFile(%s) returned an error: %s", fullPath, err)
 		}

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"mime/multipart"
 	"net/http"
@@ -46,7 +45,7 @@ type ACDClient struct {
 
 func NewACDClient(tokenFile string) (*ACDClient, error) {
 
-	description, err := ioutil.ReadFile(tokenFile)
+	description, err := os.ReadFile(tokenFile)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +210,7 @@ func (client *ACDClient) RefreshToken() (err error) {
 
 	// The file holds a refresh token, so only the owner may read it; WriteFile doesn't change the permissions
 	// of an existing file
-	err = ioutil.WriteFile(client.TokenFile, description, 0600)
+	err = os.WriteFile(client.TokenFile, description, 0600)
 	if err == nil {
 		err = os.Chmod(client.TokenFile, 0600)
 	}

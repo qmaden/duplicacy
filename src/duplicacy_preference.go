@@ -6,7 +6,6 @@ package duplicacy
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path"
 	"reflect"
@@ -43,7 +42,7 @@ func LoadPreferences(repository string) bool {
 	}
 
 	if !stat.IsDir() {
-		content, err := ioutil.ReadFile(preferencePath)
+		content, err := os.ReadFile(preferencePath)
 		if err != nil {
 			LOG_ERROR("DOT_DUPLICACY_PATH", "Failed to locate the preference path: %v", err)
 			return false
@@ -61,7 +60,7 @@ func LoadPreferences(repository string) bool {
 		preferencePath = realPreferencePath
 	}
 
-	description, err := ioutil.ReadFile(path.Join(preferencePath, "preferences"))
+	description, err := os.ReadFile(path.Join(preferencePath, "preferences"))
 	if err != nil {
 		LOG_ERROR("PREFERENCE_OPEN", "Failed to read the preference file from repository %s: %v", repository, err)
 		return false
@@ -110,7 +109,7 @@ func SavePreferences() bool {
 	}
 	preferenceFile := path.Join(GetDuplicacyPreferencePath(), "preferences")
 
-	err = ioutil.WriteFile(preferenceFile, description, 0600)
+	err = os.WriteFile(preferenceFile, description, 0600)
 	if err != nil {
 		LOG_ERROR("PREFERENCE_WRITE", "Failed to save the preference file %s: %v", preferenceFile, err)
 		return false

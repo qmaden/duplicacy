@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"mime/multipart"
 	"net/http"
@@ -53,13 +52,11 @@ type FileFabricStorage struct {
 	directoryCache     map[string]string // stores ids for directories known to this backend
 	directoryCacheLock sync.Mutex        // lock for accessing directoryCache
 
-	isAuthorized bool
-	testMode     bool
+	testMode bool
 }
 
 var (
-	errFileFabricAuthorizationFailure = errors.New("Authentication failure")
-	errFileFabricDirectoryExists      = errors.New("Directory exists")
+	errFileFabricDirectoryExists = errors.New("Directory exists")
 )
 
 // The general server response
@@ -137,7 +134,7 @@ func (storage *FileFabricStorage) getAccessToken() error {
 	}
 
 	defer readCloser.Close()
-	defer io.Copy(ioutil.Discard, readCloser)
+	defer io.Copy(io.Discard, readCloser)
 
 	var output struct {
 		FileFabricResponse
@@ -229,7 +226,7 @@ func (storage *FileFabricStorage) sendRequest(threadIndex int, method string, re
 		}
 
 		defer response.Body.Close()
-		defer io.Copy(ioutil.Discard, response.Body)
+		defer io.Copy(io.Discard, response.Body)
 
 		var output struct {
 			Status  string `xml:"status"`
@@ -293,7 +290,7 @@ func (storage *FileFabricStorage) ListFiles(threadIndex int, dir string) (files 
 		}
 
 		defer readCloser.Close()
-		defer io.Copy(ioutil.Discard, readCloser)
+		defer io.Copy(io.Discard, readCloser)
 
 		var output struct {
 			FileFabricResponse
@@ -346,7 +343,7 @@ func (storage *FileFabricStorage) getFileInfo(threadIndex int, filePath string) 
 	}
 
 	defer readCloser.Close()
-	defer io.Copy(ioutil.Discard, readCloser)
+	defer io.Copy(io.Discard, readCloser)
 
 	var output struct {
 		FileFabricResponse
@@ -404,7 +401,7 @@ func (storage *FileFabricStorage) DeleteFile(threadIndex int, filePath string) (
 	}
 
 	defer readCloser.Close()
-	defer io.Copy(ioutil.Discard, readCloser)
+	defer io.Copy(io.Discard, readCloser)
 
 	var output FileFabricResponse
 
@@ -436,7 +433,7 @@ func (storage *FileFabricStorage) MoveFile(threadIndex int, from string, to stri
 	}
 
 	defer readCloser.Close()
-	defer io.Copy(ioutil.Discard, readCloser)
+	defer io.Copy(io.Discard, readCloser)
 
 	var output FileFabricResponse
 
@@ -511,7 +508,7 @@ func (storage *FileFabricStorage) createDirectory(threadIndex int, dir string) (
 	}
 
 	defer readCloser.Close()
-	defer io.Copy(ioutil.Discard, readCloser)
+	defer io.Copy(io.Discard, readCloser)
 
 	var output struct {
 		FileFabricResponse
@@ -553,7 +550,7 @@ func (storage *FileFabricStorage) DownloadFile(threadIndex int, filePath string,
 	}
 
 	defer readCloser.Close()
-	defer io.Copy(ioutil.Discard, readCloser)
+	defer io.Copy(io.Discard, readCloser)
 	_, err = RateLimitedCopy(chunk, readCloser, storage.DownloadRateLimit/storage.threads)
 	return err
 }
@@ -587,7 +584,7 @@ func (storage *FileFabricStorage) UploadFile(threadIndex int, filePath string, c
 	}
 
 	defer readCloser.Close()
-	defer io.Copy(ioutil.Discard, readCloser)
+	defer io.Copy(io.Discard, readCloser)
 
 	var output FileFabricResponse
 

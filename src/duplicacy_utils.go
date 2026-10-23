@@ -12,6 +12,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -473,4 +474,20 @@ func PrintMemoryUsage() {
 
 		time.Sleep(time.Second)
 	}
+}
+
+// readDirectory returns the entries of a directory sorted by name, without following symbolic links, as the
+// deprecated ioutil.ReadDir did (os.ReadDir returns DirEntry values instead of FileInfo).
+func readDirectory(path string) ([]os.FileInfo, error) {
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	list, err := directory.Readdir(-1)
+	directory.Close()
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Name() < list[j].Name() })
+	return list, nil
 }

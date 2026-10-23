@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"path"
@@ -424,7 +423,7 @@ func (manager *SnapshotManager) CleanSnapshotCache(latestSnapshot *Snapshot, all
 			continue
 		}
 
-		description, err := ioutil.ReadFile(path.Join(manager.snapshotCache.storageDir,
+		description, err := os.ReadFile(path.Join(manager.snapshotCache.storageDir,
 			"snapshots", snapshotFile))
 		if err != nil {
 			LOG_WARN("SNAPSHOT_CACHE", "Failed to read the cached snapshot file: %v", err)
@@ -1623,7 +1622,7 @@ func (manager *SnapshotManager) Diff(top string, snapshotID string, revisions []
 			}
 		} else {
 			var err error
-			rightFile, err = ioutil.ReadFile(joinPath(top, filePath))
+			rightFile, err = os.ReadFile(joinPath(top, filePath))
 			if err != nil {
 				LOG_ERROR("SNAPSHOT_DIFF", "Failed to read %s from the repository: %v", filePath, err)
 				return false

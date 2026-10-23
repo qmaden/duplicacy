@@ -23,9 +23,7 @@ import (
 
 	"github.com/gilbertchen/cli"
 
-	"io/ioutil"
-
-	"github.com/gilbertchen/duplicacy/src"
+	duplicacy "github.com/gilbertchen/duplicacy/src"
 )
 
 const (
@@ -327,7 +325,7 @@ func configRepository(context *cli.Context, init bool) {
 			// write real path into .duplicacy file inside repository
 			duplicacyFileName := path.Join(repository, duplicacy.DUPLICACY_FILE)
 			d1 := []byte(preferencePath)
-			err = ioutil.WriteFile(duplicacyFileName, d1, 0644)
+			err = os.WriteFile(duplicacyFileName, d1, 0644)
 			if err != nil {
 				duplicacy.LOG_ERROR("REPOSITORY_PATH", "Failed to write %s file inside repository  %v", duplicacyFileName, err)
 				return
@@ -723,7 +721,7 @@ func changePassword(context *cli.Context) {
 	}
 
 	configPath := path.Join(duplicacy.GetDuplicacyPreferencePath(), "config")
-	err = ioutil.WriteFile(configPath, description, 0600)
+	err = os.WriteFile(configPath, description, 0600)
 	if err != nil {
 		duplicacy.LOG_ERROR("CONFIG_SAVE", "Failed to save the old config to %s: %v", configPath, err)
 		return

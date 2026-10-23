@@ -41,18 +41,17 @@ const (
 )
 
 type fixtureVariant struct {
-	name              string
-	encrypted         bool
-	compressionLevel  int
-	averageChunkSize  int
-	maximumChunkSize  int
-	minimumChunkSize  int
-	rsa               bool
-	dataShards        int
-	parityShards      int
-	separateMetadata  bool
-	legacyConfig      bool // the config file uses the old format with a static salt and fixed iterations
-	metadataChunkSize int
+	name             string
+	encrypted        bool
+	compressionLevel int
+	averageChunkSize int
+	maximumChunkSize int
+	minimumChunkSize int
+	rsa              bool
+	dataShards       int
+	parityShards     int
+	separateMetadata bool
+	legacyConfig     bool // the config file uses the old format with a static salt and fixed iterations
 }
 
 var fixtureVariants = []fixtureVariant{

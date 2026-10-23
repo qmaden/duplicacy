@@ -7,7 +7,6 @@ package duplicacy
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"regexp"
@@ -400,7 +399,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 				LOG_INFO("SSH_PUBLICKEY", "No private key file is provided")
 			} else {
 				var content []byte
-				content, err = ioutil.ReadFile(keyFile)
+				content, err = os.ReadFile(keyFile)
 				if err != nil {
 					LOG_INFO("SSH_PUBLICKEY", "Failed to read the private key file: %v", err)
 				} else {
@@ -427,7 +426,7 @@ func CreateStorage(preference Preference, resetPassword bool, threads int) (stor
 						if stat, err := os.Stat(certFile); err == nil && !stat.IsDir() {
 							LOG_DEBUG("SSH_CERTIFICATE", "Attempting to use ssh certificate from file %s", certFile)
 							var content []byte
-							content, err = ioutil.ReadFile(certFile)
+							content, err = os.ReadFile(certFile)
 							if err != nil {
 								LOG_INFO("SSH_CERTIFICATE", "Failed to read ssh certificate file %s: %v", certFile, err)
 							} else {

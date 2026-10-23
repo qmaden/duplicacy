@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"runtime"
@@ -646,7 +645,7 @@ func (config *Config) loadRSAPublicKey(keyFile string) {
 
 	// keyFile may be the actually key, in which case we don't need to read from a file
 	if !strings.Contains(keyFile, "-----BEGIN") {
-		encodedKey, err = ioutil.ReadFile(keyFile)
+		encodedKey, err = os.ReadFile(keyFile)
 		if err != nil {
 			LOG_ERROR("BACKUP_KEY", "Failed to read the public key file: %v", err)
 			return
@@ -691,7 +690,7 @@ func (config *Config) loadRSAPrivateKey(keyFile string, passphrase string) {
 
 	// keyFile may be the actually key, in which case we don't need to read from a file
 	if !strings.Contains(keyFile, "-----BEGIN") {
-		encodedKey, err = ioutil.ReadFile(keyFile)
+		encodedKey, err = os.ReadFile(keyFile)
 		if err != nil {
 			LOG_ERROR("RSA_PRIVATE", "Failed to read the private key file: %v", err)
 			return

@@ -7,7 +7,6 @@ package duplicacy
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path"
@@ -81,7 +80,7 @@ func (storage *FileStorage) ListFiles(threadIndex int, dir string) (files []stri
 
 	fullPath := path.Join(storage.storageDir, dir)
 
-	list, err := ioutil.ReadDir(fullPath)
+	list, err := readDirectory(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, nil

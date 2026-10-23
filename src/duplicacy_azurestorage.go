@@ -55,15 +55,6 @@ func CreateAzureStorage(accountName string, accountKey string,
 // ListFiles return the list of files and subdirectories under 'dir' (non-recursively)
 func (azureStorage *AzureStorage) ListFiles(threadIndex int, dir string) (files []string, sizes []int64, err error) {
 
-	type ListBlobsParameters struct {
-		Prefix     string
-		Delimiter  string
-		Marker     string
-		Include    string
-		MaxResults uint
-		Timeout    uint
-	}
-
 	if len(dir) > 0 && dir[len(dir)-1] != '/' {
 		dir += "/"
 	}

@@ -14,8 +14,9 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+
 	//"net/http/httputil"
-	"io/ioutil"
+
 	"strconv"
 	"strings"
 	"sync"
@@ -39,11 +40,10 @@ type WebDAVStorage struct {
 }
 
 var (
-	errWebDAVAuthorizationFailure = errors.New("Authentication failed")
-	errWebDAVMovedPermanently     = errors.New("Moved permanently")
-	errWebDAVNotExist             = errors.New("Path does not exist")
-	errWebDAVMaximumBackoff       = errors.New("Maximum backoff reached")
-	errWebDAVMethodNotAllowed     = errors.New("Method not allowed")
+	errWebDAVMovedPermanently = errors.New("Moved permanently")
+	errWebDAVNotExist         = errors.New("Path does not exist")
+	errWebDAVMaximumBackoff   = errors.New("Maximum backoff reached")
+	errWebDAVMethodNotAllowed = errors.New("Method not allowed")
 )
 
 func CreateWebDAVStorage(host string, port int, username string, password string, storageDir string, useHTTP bool, threads int) (storage *WebDAVStorage, err error) {
@@ -172,7 +172,7 @@ func (storage *WebDAVStorage) sendRequest(method string, uri string, depth int, 
 			return response.Body, response.Header, nil
 		}
 
-		io.Copy(ioutil.Discard, response.Body)
+		io.Copy(io.Discard, response.Body)
 		response.Body.Close()
 
 		if response.StatusCode == 301 {
@@ -234,7 +234,7 @@ func (storage *WebDAVStorage) getProperties(uri string, depth int, properties ..
 			return nil, err
 		}
 		defer readCloser.Close()
-		defer io.Copy(ioutil.Discard, readCloser)
+		defer io.Copy(io.Discard, readCloser)
 
 		object := WebDAVMultiStatus{}
 		err = xml.NewDecoder(readCloser).Decode(&object)
@@ -370,7 +370,7 @@ func (storage *WebDAVStorage) DeleteFile(threadIndex int, filePath string) (err 
 	if err != nil {
 		return err
 	}
-	io.Copy(ioutil.Discard, readCloser)
+	io.Copy(io.Discard, readCloser)
 	readCloser.Close()
 	return nil
 }
@@ -381,7 +381,7 @@ func (storage *WebDAVStorage) MoveFile(threadIndex int, from string, to string) 
 	if err != nil {
 		return err
 	}
-	io.Copy(ioutil.Discard, readCloser)
+	io.Copy(io.Discard, readCloser)
 	readCloser.Close()
 	return nil
 }
@@ -431,7 +431,7 @@ func (storage *WebDAVStorage) CreateDirectory(threadIndex int, dir string) (err 
 		}
 		return err
 	}
-	io.Copy(ioutil.Discard, readCloser)
+	io.Copy(io.Discard, readCloser)
 	readCloser.Close()
 
 	storage.directoryCacheLock.Lock()
@@ -461,7 +461,7 @@ func (storage *WebDAVStorage) UploadFile(threadIndex int, filePath string, conte
 	if err != nil {
 		return err
 	}
-	io.Copy(ioutil.Discard, readCloser)
+	io.Copy(io.Discard, readCloser)
 	readCloser.Close()
 	return nil
 }

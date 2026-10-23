@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -55,11 +54,6 @@ func CreateEmptySnapshot(id string) (snapshto *Snapshot) {
 		Revision:  0,
 		StartTime: time.Now().Unix(),
 	}
-}
-
-type DirectoryListing struct {
-	directory string
-	files     *[]Entry
 }
 
 func (snapshot *Snapshot) ListLocalFiles(top string, nobackupFile string,
@@ -248,7 +242,7 @@ func ProcessFilterFile(patternFile string, includedFiles []string) (patterns []s
 	}
 	includedFiles = append(includedFiles, patternFile)
 	LOG_INFO("SNAPSHOT_FILTER", "Parsing filter file %s", patternFile)
-	patternFileContent, err := ioutil.ReadFile(patternFile)
+	patternFileContent, err := os.ReadFile(patternFile)
 	if err == nil {
 		patternFileLines := strings.Split(string(patternFileContent), "\n")
 		patterns = ProcessFilterLines(patternFileLines, includedFiles)
