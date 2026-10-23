@@ -37,6 +37,9 @@ const (
 var ScriptEnabled bool
 var GitCommit = "unofficial"
 
+// Version is set from the release tag by the release build (-ldflags "-X main.Version=...")
+var Version = "3.2.5"
+
 func getRepositoryPreference(context *cli.Context, storageName string) (repository string,
 	preference *duplicacy.Preference) {
 
@@ -2334,7 +2337,7 @@ func newApp() *cli.App {
 	app.Name = "duplicacy"
 	app.HelpName = "duplicacy"
 	app.Usage = "A new generation cloud backup tool based on lock-free deduplication"
-	app.Version = "3.2.5" + " (" + GitCommit + ")"
+	app.Version = Version + " (" + GitCommit + ")"
 
 	// Exit with code 2 if an invalid command is provided
 	app.CommandNotFound = func(context *cli.Context, command string) {

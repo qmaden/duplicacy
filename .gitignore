@@ -12,3 +12,6 @@ src/test_storage.conf
 .DS_Store
 .idea/
 .vscode/
+
+# Release builds (.github/scripts/build-release.sh)
+/dist/
