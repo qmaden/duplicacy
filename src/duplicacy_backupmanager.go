@@ -972,6 +972,9 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 
 	startDownloadingTime := time.Now().Unix()
 
+	metadataPool := newRestoreMetadataPool(restoreMetadataWorkers, setOwner)
+	defer metadataPool.wait()
+
 	// Now download files one by one
 	for _, file := range fileEntries {
 
@@ -1055,7 +1058,7 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			}
 			newFile.Close()
 
-			file.RestoreMetadata(fullPath, nil, setOwner)
+			metadataPool.restore(file, fullPath)
 			if !showStatistics {
 				LOG_INFO("DOWNLOAD_DONE", "Downloaded %s (0)", file.Path)
 				downloadedFileSize += file.Size
@@ -1085,8 +1088,11 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 			skippedFileSize += file.Size
 			skippedFileCount++
 		}
-		file.RestoreMetadata(fullPath, nil, setOwner)
+		metadataPool.restore(file, fullPath)
 	}
+
+	// Directory attributes and deletions below must come after all file attributes are set
+	metadataPool.wait()
 
 	if deleteMode && len(patterns) == 0 {
 		// A path that changed between a file and a directory is both an extra local entry and an entry of the
@@ -1166,6 +1172,54 @@ func (manager *BackupManager) Restore(top string, revision int, inPlace bool, qu
 	chunkOperator.Stop()
 
 	return 0
+}
+
+// Number of goroutines that set the attributes of restored files
+const restoreMetadataWorkers = 8
+
+// restoreMetadataPool sets the permissions, owner, times and extended attributes of restored files on several
+// goroutines.  File contents must be written in the order of the chunk stream, but these system calls, about a
+// fifth of the time of restoring many small files, are independent for each file.
+type restoreMetadataPool struct {
+	tasks    chan restoreMetadataTask
+	done     sync.WaitGroup
+	finished bool
+}
+
+type restoreMetadataTask struct {
+	entry    *Entry
+	fullPath string
+}
+
+func newRestoreMetadataPool(workers int, setOwner bool) *restoreMetadataPool {
+	pool := &restoreMetadataPool{tasks: make(chan restoreMetadataTask, workers*4)}
+	pool.done.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer pool.done.Done()
+			// RestoreMetadata reports failures with LOG_ERROR, which ends the restore as on the main goroutine
+			defer CatchLogException()
+			for task := range pool.tasks {
+				task.entry.RestoreMetadata(task.fullPath, nil, setOwner)
+			}
+		}()
+	}
+	return pool
+}
+
+// restore queues the attributes of 'entry' to be applied to the file at 'fullPath'.
+func (pool *restoreMetadataPool) restore(entry *Entry, fullPath string) {
+	pool.tasks <- restoreMetadataTask{entry: entry, fullPath: fullPath}
+}
+
+// wait returns once all queued attributes are applied.  It may be called more than once; no tasks can be added
+// after the first call.
+func (pool *restoreMetadataPool) wait() {
+	if !pool.finished {
+		pool.finished = true
+		close(pool.tasks)
+	}
+	pool.done.Wait()
 }
 
 // UploadSnapshot uploads the specified snapshot to the storage. It turns Files, ChunkHashes, and ChunkLengths into
