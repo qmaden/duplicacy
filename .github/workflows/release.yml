@@ -1,10 +1,15 @@
 name: Release
 
 # Pushing a tag such as v3.3.0 (or v3.3.0-rc1 for a pre-release) builds the binaries and the .deb package and
-# publishes them as a GitHub release.  See docs/BUILDING.md.
+# publishes them as a GitHub release.  See docs/BUILDING.md.  Pull requests that change the release files run
+# everything except publishing, with a placeholder version.
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/scripts/build-release.sh
 
 permissions:
   contents: read
@@ -12,6 +17,8 @@ permissions:
 env:
   GO_VERSION: "1.26.10"
   GOTOOLCHAIN: local
+  # The tag without its leading "v", or a placeholder when not building a tag
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v0.0.0-test' }}
 
 jobs:
   test:
@@ -19,12 +26,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check the tag format
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
             echo "Tag $GITHUB_REF_NAME is not of the form v1.2.3 or v1.2.3-rc1"; exit 1
           fi
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Tests
@@ -35,24 +43,24 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Build
         env:
           DEB_MAINTAINER: ${{ vars.DEB_MAINTAINER }}
         run: |
-          version=${GITHUB_REF_NAME#v}
+          version=${VERSION#v}
           .github/scripts/build-release.sh binary linux amd64 "$version"
           .github/scripts/build-release.sh deb "$version"
       - name: Install the package and run it
         run: |
           sudo dpkg -i dist/*.deb
           duplicacy -h | grep -A1 VERSION
-          duplicacy -h | grep -q "${GITHUB_REF_NAME#v}"
+          duplicacy -h | grep -q "${VERSION#v}"
           sudo dpkg -r duplicacy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: dist/
@@ -64,18 +72,18 @@ jobs:
     # Keychain support needs cgo, so the macOS binaries are built on macOS
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Build
         run: |
-          version=${GITHUB_REF_NAME#v}
+          version=${VERSION#v}
           .github/scripts/build-release.sh binary darwin arm64 "$version"
           .github/scripts/build-release.sh binary darwin amd64 "$version"
           file dist/*
           ./dist/duplicacy_osx_arm64_* -h | grep -A1 VERSION
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: dist/
@@ -88,18 +96,23 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - name: Create the release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Checksums
         run: |
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+          test "$(ls | wc -l)" -eq 5
+      - name: Create the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
           prerelease=""
           [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease="--prerelease"
           gh release create "$GITHUB_REF_NAME" * --title "Duplicacy ${GITHUB_REF_NAME#v}" --generate-notes \
