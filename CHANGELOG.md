@@ -24,6 +24,8 @@ All notable changes to this fork are listed here. The format follows
 - Benchmarks for chunk encryption, decryption and chunking (`go test -bench . ./src`).
 - Tests for the cloud backends without credentials: in-process fakes of S3, Google Cloud Storage and Google Drive,
   and Azurite for Azure (`-storage fake-s3`, `fake-gcs`, `fake-gcd`, `azurite`); they run in CI.
+- Release workflow: pushing a version tag publishes Linux x86-64 and macOS binaries and a `.deb` package as a
+  GitHub release (see `docs/BUILDING.md`). The version shown by `duplicacy -h` comes from the tag.
 - Documentation: generated command reference (`docs/COMMANDS.md`), `docs/storage-backends.md`,
   `docs/ARCHITECTURE.md`, `docs/PRUNE_SAFETY.md` and decision records in `docs/adr/`; the README describes the fork.
 

@@ -33,6 +33,34 @@ All storage backends are compiled in; no cgo is required.
 - **Don't swap compression, hashing or erasure-coding libraries** without running `TestGoldenFixtures` and reading
   `docs/FORMAT.md`. Their output is part of the storage format.
 
+## Releasing
+
+Pushing a version tag publishes a release. `.github/workflows/release.yml` runs the tests, builds the binaries and
+the Debian package, and attaches them to a GitHub release with a `SHA256SUMS` file:
+
+```bash
+git checkout master && git pull
+git tag v3.3.0          # or v3.3.0-rc1 for a pre-release
+git push origin v3.3.0
+```
+
+| File | Contents |
+|------|----------|
+| `duplicacy_linux_x64_<version>` | Static Linux x86-64 binary |
+| `duplicacy_<version>_amd64.deb` | The same binary installed as `/usr/bin/duplicacy`, with the license, README and changelog |
+| `duplicacy_osx_arm64_<version>`, `duplicacy_osx_x64_<version>` | macOS binaries for Apple Silicon and Intel |
+
+- The version shown by `duplicacy -h` comes from the tag (`-X main.Version`), so the source doesn't need editing.
+- macOS binaries are built on a macOS runner because Keychain support needs cgo. They are not signed or
+  notarized: after downloading one with a browser, run `xattr -d com.apple.quarantine <file>` (or right-click,
+  Open) the first time.
+- The package's `Maintainer` field is the author of the tagged commit, unless the repository variable
+  `DEB_MAINTAINER` (Settings, Secrets and variables, Actions, Variables) is set, for example to
+  `Name <email>`.
+- To check a release locally: `.github/scripts/build-release.sh binary linux amd64 3.3.0` and
+  `.github/scripts/build-release.sh deb 3.3.0` (needs `dpkg-deb`, for example in a Debian container); macOS
+  binaries can only be built on macOS.
+
 ## Upgrading Go
 
 1. Change the `toolchain` line in `go.mod`; keep the `go` directive at the lowest version the code needs.

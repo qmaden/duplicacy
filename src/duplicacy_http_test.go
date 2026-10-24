@@ -12,14 +12,35 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
-// W1: with http.DefaultClient (2 idle connections per host) most requests from parallel threads opened a new
-// connection; the storage client keeps one connection per thread.
+// W1: http.DefaultClient keeps only 2 idle connections per host, so after a burst of parallel requests most
+// threads had to open a new connection; the storage client keeps one per thread.  The server holds each round of
+// requests until all of them have arrived, so a round uses exactly one connection per thread, and the second
+// round shows how many of those connections the client kept.
 func TestHTTPClientReusesConnections(t *testing.T) {
+	const threads = 8
 	count := func(client *http.Client) int32 {
 		var connections int32
+		var lock sync.Mutex
+		arrived := 0
+		release := make(chan struct{})
 		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			lock.Lock()
+			arrived++
+			wait := release
+			if arrived == threads {
+				close(release)
+				arrived = 0
+				release = make(chan struct{})
+			}
+			lock.Unlock()
+			select {
+			case <-wait:
+			case <-time.After(10 * time.Second):
+				t.Error("Not all requests of a round arrived")
+			}
 			w.Write([]byte("ok"))
 		}))
 		server.Config.ConnState = func(conn net.Conn, state http.ConnState) {
@@ -30,12 +51,12 @@ func TestHTTPClientReusesConnections(t *testing.T) {
 		server.Start()
 		defer server.Close()
 
-		var wg sync.WaitGroup
-		for thread := 0; thread < 8; thread++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for i := 0; i < 20; i++ {
+		for round := 0; round < 2; round++ {
+			var wg sync.WaitGroup
+			for thread := 0; thread < threads; thread++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
 					response, err := client.Get(server.URL)
 					if err != nil {
 						t.Error(err)
@@ -43,18 +64,23 @@ func TestHTTPClientReusesConnections(t *testing.T) {
 					}
 					io.Copy(io.Discard, response.Body)
 					response.Body.Close()
-				}
-			}()
+				}()
+			}
+			wg.Wait()
+			// A connection goes back to the idle pool just after its response body is read to the end
+			time.Sleep(200 * time.Millisecond)
 		}
-		wg.Wait()
 		return atomic.LoadInt32(&connections)
 	}
 
-	tuned := count(newHTTPClient(8))
+	tuned := count(newHTTPClient(threads))
 	defaultClient := count(&http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()})
-	t.Logf("Connections for 160 requests from 8 threads: %d with the storage client, %d with the default client",
-		tuned, defaultClient)
-	if tuned > 12 {
-		t.Errorf("The storage client opened %d connections for 8 threads", tuned)
+	t.Logf("Connections for 2 rounds of %d parallel requests: %d with the storage client, %d with the default client",
+		threads, tuned, defaultClient)
+	if tuned != threads {
+		t.Errorf("The storage client opened %d connections instead of reusing %d", tuned, threads)
+	}
+	if defaultClient <= threads {
+		t.Errorf("The default client opened only %d connections; the test no longer shows the difference", defaultClient)
 	}
 }
